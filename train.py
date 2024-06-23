@@ -2,6 +2,7 @@
 import operator
 import os
 import time
+import subprocess
 
 import env
 env.set_variables()
@@ -409,7 +410,7 @@ def main_contained(config, logger):
     assert config.model.vocab > loader.max_token_id, f"{config.model.vocab} vs {loader.max_token_id}"
     
     model_dir = os.path.join(config.paths.root_working_dir, config.paths.model_name)
-    training_io.mkdir(model_dir)
+    # training_io.mkdir(model_dir)
     state = jax.jit(partial(State.init, config.model))(fold_in_str(root_rng, 'init'))
     state, start_step = training_io.load_checkpoint_if_it_exists(model_dir, state, config.io)
 
@@ -417,8 +418,10 @@ def main_contained(config, logger):
     # See https://bnikolic.co.uk/blog/python/jax/2022/02/22/jax-outputgraph-rev
     c_training_step = training_step.lower(state, jnp.uint32(0), config.model, config.training, loader.load(0)).compile()
     date = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-    training_io.save_hlo_svg(os.path.join(model_dir, f'training_step_optimized_hlo_{date}.svg'), c_training_step)
+    # training_io.save_hlo_svg(os.path.join(model_dir, f'training_step_optimized_hlo_{date}.svg'), c_training_step)
 
+    log_interval = config.training.steps // 5000
+    
     for step in range(start_step, config.training.steps):
       if step % config.checkpoint_interval == 0 and step > start_step:
         training_io.save_checkpoint(model_dir, step, state, config.io)
@@ -441,26 +444,29 @@ def main_contained(config, logger):
         # Print MFU, including (one step of) data loading time.
         print(f"Profile time: {profile_duration}s for 2 steps.")
         model_params = jax.tree.reduce(operator.add, jax.tree.map(lambda w: w.size, state.weights))
-        tokens = loader.load(step).targets.size
+        tokens = config.training.tokens.batch * config.training.tokens.len
         print(f'Model params: {model_params:_}')
         print(f'Tokens: {tokens:_}')
         device_flops = training_io.get_flops_per_device()
         num_devices = jax.device_count()
         print(f'MFU (projections only): {100 * (2 * 6 * model_params * tokens / (num_devices * profile_duration)) / device_flops:.2f}% MFU')
 
-      training_io.log(step, logger, output)
+      if step % log_interval == 0: 
+        training_io.log(step, logger, output)
 
 
 @hydra.main(config_path='configs', version_base=None)
 def main(config):
   config = jax_extra.make_dataclass_from_dict(Config, config)
   if config.training.queue:
-    task = Task.init(project_name='testing', task_name=config.paths.model_name)
+    config_name = hydra.core.hydra_config.HydraConfig.get()['job']['config_name']
+    git_branch_name = subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout.strip()
+    task = Task.init(project_name=f'{config_name}/{git_branch_name}', task_name=config.paths.model_name)
     logger = task.get_logger()
     task.execute_remotely(queue_name=config.training.queue)
-    task.launch_multi_node(config.num_hosts, wait=True)
-    if int(os.environ['RANK']) > 0:
-      task.set_system_tags((task.get_system_tags() or []) + ['hidden'])
+    task.launch_multi_node(config.num_hosts, wait=True, queue=config.training.queue + '-workers')
+    # if int(os.environ['RANK']) > 0:
+    #   task.set_system_tags((task.get_system_tags() or []) + ['hidden'])
     jax.distributed.initialize(os.environ['MASTER_ADDR'] + ':' + os.environ['MASTER_PORT'],
                         num_processes=int(os.environ['WORLD_SIZE']),
                         process_id=int(os.environ['RANK']))

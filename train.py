@@ -56,7 +56,7 @@ class Model:
   ln1: f32['layers d_model/t/d']
   ln2: f32['layers d_model/t/d']
   w_q: f32['layers d_model/d n_q_per_kv n_kv/t d_head']
-  w_kv: f32['layers 2 d_model/d n_kv/t d_head']
+  w_kv: f32['layers d_model/d n_kv/t d_head']
   w_o: f32['layers d_model/d n_q_per_kv n_kv/t d_head']
   w_gate: f32['layers d_model/d d_ff/t']
   w_up: f32['layers d_model/d d_ff/t']
@@ -88,11 +88,11 @@ class Model:
     w_down_scale = 1 / (math.sqrt(h.d_ff) * truncated_normal_stddev)
     unembed_scale = d_model_scale
 
-    w_kv_shape = (h.layers, 2, h.d_model, h.n_kv, h.d_head)
+    w_kv_shape = (h.layers, h.d_model, h.n_kv, h.d_head)
     w_kv = w_kv_scale * jax.random.truncated_normal(fold_in_str(rng, 'w_kv'), -2, 2, w_kv_shape, dtype=jnp.float32)
     w_q_shape = (h.layers, h.d_model, h.n_q_per_kv, h.n_kv, h.d_head)
     w_q = w_q_scale * jax.random.truncated_normal(fold_in_str(rng, 'w_q'), -2, 2, w_q_shape, dtype=jnp.float32)
-    w_kv_shape = (h.layers, 2, h.d_model, h.n_kv, h.d_head)
+    w_kv_shape = (h.layers, h.d_model, h.n_kv, h.d_head)
     w_kv = w_kv_scale * jax.random.truncated_normal(fold_in_str(rng, 'w_kv'), -2, 2, w_kv_shape, dtype=jnp.float32)
     w_o_shape = w_q_shape
     w_o = w_o_scale * jax.random.truncated_normal(fold_in_str(rng, 'w_o'), -2, 2, w_o_shape, dtype=jnp.float32)
@@ -151,11 +151,10 @@ class Model:
       w_q = shardops.all_gather('M/d Q K/t D -> M Q K/t D', jnp.bfloat16(w_q))
       q = save_for_backward(shardops.einsum_unreduced('B/d L M, M Q K/t D -> B/d L Q K/t D', nx, w_q))
       q = rope_table.apply('L D -> 1 L 1 1 D', q)
-      w_kv = shardops.all_gather('2 M/d K/t D -> 2 M K/t D', jnp.bfloat16(w_kv))
-      k, v = shardops.einsum_unreduced('B/d L M, k_v M K/t D -> k_v B/d L K/t D', nx, w_kv)
-      k = save_for_backward(k)
+      w_kv = shardops.all_gather('M/d K/t D -> M K/t D', jnp.bfloat16(w_kv))
+      v = shardops.einsum_unreduced('B/d L M, M K/t D -> B/d L K/t D', nx, w_kv)
       v = save_for_backward(v)
-      k = rope_table.apply('L d -> 1 L 1 d', k)
+      k = rope_table.apply('L d -> 1 L 1 d', v)
       logits = shardops.einsum_unreduced(
         'B/d Qlen Q K/t D, B/d Klen K/t D -> B/d Qlen Klen Q K/t', q, k, preferred_element_type=jnp.float32)
       logits = jnp.where(causal_mask, logits, -1e10)

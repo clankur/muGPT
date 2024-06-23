@@ -451,7 +451,7 @@ def main_contained(config, logger):
         num_devices = jax.device_count()
         print(f'MFU (projections only): {100 * (2 * 6 * model_params * tokens / (num_devices * profile_duration)) / device_flops:.2f}% MFU')
 
-      if step % log_interval == 0: 
+      if log_interval == 0 or step % log_interval == 0: 
         training_io.log(step, logger, output)
 
 

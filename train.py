@@ -423,8 +423,8 @@ def main_contained(config, logger):
     log_interval = config.training.steps // 5000
     
     for step in range(start_step, config.training.steps):
-      if step % config.checkpoint_interval == 0 and step > start_step:
-        training_io.save_checkpoint(model_dir, step, state, config.io)
+      # if step % config.checkpoint_interval == 0 and step > start_step:
+      #   training_io.save_checkpoint(model_dir, step, state, config.io)
       
       # We profile on the second step, because the first step has a long pause for XLA 
       # compilation and initial shuffle buffer loading.

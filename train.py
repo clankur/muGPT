@@ -454,6 +454,23 @@ def main_contained(config, logger):
       if log_interval == 0 or step % log_interval == 0: 
         training_io.log(step, logger, output)
 
+def clear_locks():
+  try:
+    process = subprocess.run(['sudo', 'lsof', '-w', '/dev/accel0'], capture_output=True, text=True)
+    output = process.stdout
+    pids = set()
+    for line in output.splitlines()[1:]:  # Skip the header line
+      parts = line.split()
+      if len(parts) > 1:
+        pids.add(parts[1])
+    
+    print(f"pids {pids}")
+    for pid in pids:
+      subprocess.run(['sudo', 'kill', '-9', pid])
+    if pids:
+      subprocess.run(['sudo', 'rm', '/tmp/libtpu_lockfile'])
+  except:
+    pass
 
 @hydra.main(config_path='configs', version_base=None)
 def main(config):
@@ -465,6 +482,7 @@ def main(config):
     logger = task.get_logger()
     task.execute_remotely(queue_name=config.training.queue)
     task.launch_multi_node(config.num_hosts, wait=True, queue=config.training.queue + '-workers')
+    clear_locks()
     # if int(os.environ['RANK']) > 0:
     #   task.set_system_tags((task.get_system_tags() or []) + ['hidden'])
     jax.distributed.initialize(os.environ['MASTER_ADDR'] + ':' + os.environ['MASTER_PORT'],

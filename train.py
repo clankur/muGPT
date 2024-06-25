@@ -38,6 +38,18 @@ from jax.tree_util import tree_leaves
 PRNGKey = Any
 
 @dataclass(frozen=True)
+class BaseWidths:
+  d_model: int
+  n_q_per_kv: int
+  n_kv: int
+  d_head:int
+  layers: int
+  d_ff: int
+  
+  warmup_steps:int
+  steps: int
+ 
+@dataclass(frozen=True)
 class Hparams:
   d_model: int
   n_q_per_kv: int
@@ -47,8 +59,10 @@ class Hparams:
   vocab: int
   d_ff: int
   rope_max_timescale: int
-
-
+  base: BaseWidths
+  a_attn: float
+  a_output: float
+ 
 @pytree_dataclass
 class Model:
   embed: f32['vocab/t d_model/d']
@@ -77,23 +91,23 @@ class Model:
     # The constant is stddev of standard normal truncated to (-2, 2)
     truncated_normal_stddev = .87962566103423978
 
+    base = h.base
+
     # scale for tensors with d_model fan_in and truncated normal truncated to (-2, 2)
-    d_model_scale = 1 / (math.sqrt(h.d_model) * truncated_normal_stddev)
+    d_model_scale = 1 / (h.d_model * truncated_normal_stddev)
 
     w_kv_scale = d_model_scale
-    w_q_scale = d_model_scale / math.sqrt(h.d_head)
+    w_q_scale = d_model_scale * h.a_attn * math.sqrt(base.d_head) / h.d_head 
     total_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
-    w_o_scale = 1 / (math.sqrt(total_head_dim) * truncated_normal_stddev)
+    w_o_scale = 1 / (total_head_dim * truncated_normal_stddev)
     w_up_scale = d_model_scale
-    w_down_scale = 1 / (math.sqrt(h.d_ff) * truncated_normal_stddev)
-    unembed_scale = d_model_scale
+    w_down_scale = 1 / (h.d_ff * truncated_normal_stddev)
+    unembed_scale = h.a_output * d_model_scale
 
     w_kv_shape = (h.layers, 2, h.d_model, h.n_kv, h.d_head)
     w_kv = w_kv_scale * jax.random.truncated_normal(fold_in_str(rng, 'w_kv'), -2, 2, w_kv_shape, dtype=jnp.float32)
     w_q_shape = (h.layers, h.d_model, h.n_q_per_kv, h.n_kv, h.d_head)
     w_q = w_q_scale * jax.random.truncated_normal(fold_in_str(rng, 'w_q'), -2, 2, w_q_shape, dtype=jnp.float32)
-    w_kv_shape = (h.layers, 2, h.d_model, h.n_kv, h.d_head)
-    w_kv = w_kv_scale * jax.random.truncated_normal(fold_in_str(rng, 'w_kv'), -2, 2, w_kv_shape, dtype=jnp.float32)
     w_o_shape = w_q_shape
     w_o = w_o_scale * jax.random.truncated_normal(fold_in_str(rng, 'w_o'), -2, 2, w_o_shape, dtype=jnp.float32)
 

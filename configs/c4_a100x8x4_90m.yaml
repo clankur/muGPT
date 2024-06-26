@@ -1,0 +1,40 @@
+# python -m train --config-name=c4_a100x8_270m +paths.model_name=270m
+defaults:
+- c4_a100x8_base
+- _self_
+
+num_hosts: 4
+
+mesh:
+  d: 16
+  t: 1
+
+training:
+  warmup_steps: 2300
+  steps:        23000
+  steps_for_lr: 23000
+  learning_rate: 3.0e-4
+  tokens:
+    batch: 256
+
+model:
+  d_model: 512
+  n_q_per_kv: 1
+  n_kv: 8
+  d_head: 64 
+  layers: 8 
+  d_ff: 4096 
+  vocab: 32768
+  rope_max_timescale: 10000
+  a_attn: 1
+  a_output: 1 
+
+  base:
+    d_model: 512
+    n_q_per_kv: 1
+    n_kv: 8
+    d_head: 64 
+    layers: 8 
+    d_ff: 4096
+
+checkpoint_interval: 9200

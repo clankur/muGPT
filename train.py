@@ -91,6 +91,7 @@ class Model:
     base = h.base
 
     # scale for tensors with d_model fan_in and truncated normal truncated to (-2, 2)
+    base_model_scale = 1 / (base.d_model * truncated_normal_stddev)
     d_model_scale = 1 / (h.d_model * truncated_normal_stddev)
 
     w_kv_scale = d_model_scale
@@ -99,7 +100,7 @@ class Model:
     w_o_scale = 1 / (total_head_dim * truncated_normal_stddev)
     w_up_scale = d_model_scale
     w_down_scale = 1 / (h.d_ff * truncated_normal_stddev)
-    unembed_scale = h.a_output * d_model_scale
+    unembed_scale = h.a_output * math.sqrt(base_model_scale) * d_model_scale
 
     w_kv_shape = (h.layers, 2, h.d_model, h.n_kv, h.d_head)
     w_kv = w_kv_scale * jax.random.truncated_normal(fold_in_str(rng, 'w_kv'), -2, 2, w_kv_shape, dtype=jnp.float32)
@@ -334,10 +335,26 @@ def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHpa
     global_norm = jnp.sqrt(global_norm_square)
     rescale = jnp.minimum(1.0, 1.0 / global_norm)
 
+    base = h.base
+    
+    lr_scales = Model(
+      embed=1.0,
+      unembed=1.0,
+      ln1=1.0,
+      ln2=1.0,
+      w_q=h.d_model/base.d_model,
+      w_kv=h.d_model/base.d_model,
+      w_o=h.d_head * h.n_kv * h.n_q_per_kv/base.d_head * base.n_kv * base.n_q_per_kv,
+      w_gate=h.d_model/base.d_model,
+      w_up=h.d_model/base.d_model,
+      w_down=h.d_ff/base.d_ff,
+      final_layer_norm=1.0
+    )
+
     new_ps = []
     new_mus = []
     new_nus = []
-    for p, g, mu, nu, spec in zip(tree_leaves(state.weights), grad_leaves, tree_leaves(state.adam_mu), tree_leaves(state.adam_nu), tree_leaves(shardtypes.make_partition_specs(State))):
+    for p, g, mu, nu, spec, scale in zip(tree_leaves(state.weights), grad_leaves, tree_leaves(state.adam_mu), tree_leaves(state.adam_nu), tree_leaves(shardtypes.make_partition_specs(State)), tree_leaves(lr_scales)):
       assert shardtypes.is_fully_sharded(spec), 'Weight update is only correctly scaled for fully sharded weights.'
       # Gradient clipping
       g = g * rescale
@@ -352,7 +369,7 @@ def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHpa
       # Weight decay
       g += hparams.weight_decay * p
       # Learning rate
-      g *= lr
+      g *= lr * scale
 
       # Apply update
       new_ps.append(p - g)

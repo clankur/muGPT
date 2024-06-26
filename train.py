@@ -45,10 +45,7 @@ class BaseWidths:
   d_head:int
   layers: int
   d_ff: int
-  
-  warmup_steps:int
-  steps: int
- 
+
 @dataclass(frozen=True)
 class Hparams:
   d_model: int

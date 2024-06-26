@@ -420,7 +420,7 @@ def main_contained(config, logger):
     date = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
     # training_io.save_hlo_svg(os.path.join(model_dir, f'training_step_optimized_hlo_{date}.svg'), c_training_step)
 
-    log_interval = config.training.steps // 5000
+    log_interval = math.ceil(config.training.steps // 5000) 
     
     for step in range(start_step, config.training.steps):
       # if step % config.checkpoint_interval == 0 and step > start_step:

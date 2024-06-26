@@ -276,6 +276,7 @@ class HuggingFaceDataParams:
     num_workers: int
     sequences_packed_per_batch: int
     name: Optional[str] = None
+    seed: int = 0
 
 class HuggingFaceDataLoader:
     """
@@ -298,6 +299,7 @@ class HuggingFaceDataLoader:
         # setup an iterator over the dataset
         tokenize = functools.partial(self.tokenizer, padding=False, truncation=False, max_length=None, add_special_tokens=False, return_token_type_ids=False, return_attention_mask=False, return_tensors="np")
         dataset = load_dataset(config.path, config.name, streaming=True, split=split)
+        dataset = dataset.shuffle(seed=config.seed)
         tokenized = dataset.select_columns(["text"]).map(tokenize, input_columns=['text'], remove_columns=["text"])
         dataloader = DataLoader(tokenized, num_workers=config.num_workers, collate_fn=self.collate, drop_last=True, batch_size=config.sequences_packed_per_batch)
         self.iterator = iter(dataloader)

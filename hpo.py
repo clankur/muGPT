@@ -32,8 +32,13 @@ def create_hpo_task(lr_range_log, config: Config):
             text=True,
         ).stdout.strip()
         config_name = hydra.core.hydra_config.HydraConfig.get()["job"]["config_name"]
+        project_name = f"{config_name}/{git_branch_name}"
+        task_name = config.paths.model_name
+        
+        print(f"{project_name=}")
+        print(f"{task_name=}")
         args["template_task_id"] = Task.get_task(
-            project_name=f"{config_name}/{git_branch_name}",
+            project_name=f"{config_name}/main",
             task_name=config.paths.model_name,
         ).id
 
@@ -46,8 +51,9 @@ def create_hpo_task(lr_range_log, config: Config):
                 10 ** lr_range_log[1],
             ),
         ],
-        objective_metric_title="validation_accuracy",  # Metric to optimize
-        objective_metric_series="Series",  # Specific metric series
+        objective_metric_title='loss',
+        objective_metric_series='loss',
+        objective_metric_sign='min',  
         max_number_of_concurrent_tasks=2,
         optimizer_class=OptimizerOptuna,
         total_max_jobs=10,

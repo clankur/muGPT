@@ -3,6 +3,7 @@ import operator
 import os
 import time
 import subprocess
+import signal
 
 import env
 env.set_variables()
@@ -454,24 +455,22 @@ def main_contained(config, logger):
       if log_interval == 0 or step % log_interval == 0: 
         training_io.log(step, logger, output)
 
-def clear_locks():
+def clear_tpu_locks():
   try:
-    process = subprocess.run(['sudo', 'lsof', '-w', '/dev/accel0'], capture_output=True, text=True)
-    output = process.stdout
+    raw_pids = subprocess.run(['lsof', '-w', '/dev/accel0'], capture_output=True, text=True).stdout
     pids = set()
-    for line in output.splitlines()[1:]:  # Skip the header line
+    for line in raw_pids.splitlines()[1:]:  
       parts = line.split()
       if len(parts) > 1:
         pids.add(parts[1])
-    
-    print(f"pids {pids}")
     for pid in pids:
-      subprocess.run(['sudo', 'kill', '-9', pid])
+      os.kill(int(pid), signal.SIGTERM)
     if pids:
-      subprocess.run(['sudo', 'rm', '/tmp/libtpu_lockfile'])
-  except:
+      os.remove('/tmp/libtpu_lockfile')
+  except Exception as e:
+    print(f'Error clearing TPU locks: {e}')
     pass
-
+  
 @hydra.main(config_path='configs', version_base=None)
 def main(config):
   config = jax_extra.make_dataclass_from_dict(Config, config)
@@ -482,7 +481,7 @@ def main(config):
     logger = task.get_logger()
     task.execute_remotely(queue_name=config.training.queue)
     task.launch_multi_node(config.num_hosts, wait=True, queue=config.training.queue + '-workers')
-    clear_locks()
+    clear_tpu_locks()
     # if int(os.environ['RANK']) > 0:
     #   task.set_system_tags((task.get_system_tags() or []) + ['hidden'])
     jax.distributed.initialize(os.environ['MASTER_ADDR'] + ':' + os.environ['MASTER_PORT'],

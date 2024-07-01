@@ -1,12 +1,7 @@
-from clearml.automation import LogUniformParameterRange, UniformIntegerParameterRange
-from clearml.automation import HyperParameterOptimizer
-from clearml.automation.optuna import OptimizerOptuna
 from clearml import Task
 import numpy as np
 import hydra
-import jax
 import jax_extra
-import os
 from train import Config
 import subprocess
 
@@ -31,7 +26,6 @@ def get_base_template_id(config: Config):
     ).id
 
 
-
 def lr_sweep_binary_search(
     lower_bound, upper_bound, template_task_id, max_iterations=5, queue_name="default"
 ):
@@ -48,7 +42,7 @@ def lr_sweep_binary_search(
         )
         child_task.set_parameter("Hydra/training.learning_rate", learning_rate ) 
         print(f"training model with lr: {learning_rate}")
-        for i in range(2):
+        for i in range(3):
             try:
                 Task.enqueue(child_task.id, queue_name=queue_name)
                 child_task.wait_for_status()
@@ -57,14 +51,12 @@ def lr_sweep_binary_search(
                 child_task = Task.clone(
                     source_task=child_task.id, name=f"LR Sweep {i+1} - LR {learning_rate:.6f}"
                 )
-                if i == 1:
+                if i +1 == 3:
                     raise e
                 print(e)
 
-        # Get the results from the child task
+        # Get the loss from the child task
         child_task_results = child_task.get_reported_scalars()
-        # print(f"{child_task_results=}")
-        # print(f"{child_task_results['loss']=}")
         return child_task_results["loss"]["loss"]["y"][-1]
   
     def get_loss (lr):
@@ -90,7 +82,7 @@ def lr_sweep_binary_search(
         pt_logger.report_scalar("loss", "value", loss, iteration=i)
 
         print(f"Iteration {i+1}: LR = {lr:.6f}, Loss = {loss:.6f}")
-        print(f"Bounds = [{lower_bound:.6f}, {upper_bound:.6f}]")
+        print(f"Bounds = [{10**lower_bound:.6f}, {10**upper_bound:.6f}]")
 
         # Check for convergence
         if np.isclose(lower_bound, upper_bound, rtol=1e-5):

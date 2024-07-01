@@ -1,4 +1,4 @@
-# python -m train --config-name=c4_a100x8x4_10m_narrow +paths.model_name=270m
+# python -m train --config-name=c4_a100x8_270m +paths.model_name=270m
 defaults:
 - c4_a100x8_base
 - _self_
@@ -13,14 +13,14 @@ training:
   warmup_steps: 110
   steps:        1100
   steps_for_lr: 1100
-  learning_rate: 1.6e-2
+  learning_rate: 1.0e-2
   tokens:
     batch: 256
 
 model:
   d_model: 128
   n_q_per_kv: 1
-  n_kv: 16 
+  n_kv: 8 
   d_head: 64 
   layers: 8
   d_ff: 1024 

@@ -467,17 +467,24 @@ def clear_tpu_locks():
       os.kill(int(pid), signal.SIGTERM)
     if pids:
       os.remove('/tmp/libtpu_lockfile')
+    time.sleep(20)
   except Exception as e:
     print(f'Error clearing TPU locks: {e}')
     pass
+  
   
 @hydra.main(config_path='configs', version_base=None)
 def main(config):
   config = jax_extra.make_dataclass_from_dict(Config, config)
   if config.training.queue:
     config_name = hydra.core.hydra_config.HydraConfig.get()['job']['config_name']
+    task_name = config.paths.model_name
+    if task_name == config_name:
+        overrides = hydra.core.hydra_config.HydraConfig.get()['job']['override_dirname']
+        overrides = ','.join(overrides.split(',')[2:]).replace("=", ':')
+        task_name = f"{config_name}_{overrides}"
     git_branch_name = subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout.strip()
-    task = Task.init(project_name=f'{config_name}/{git_branch_name}', task_name=config.paths.model_name)
+    task = Task.init(project_name=f'{config_name}/{git_branch_name}', task_name=task_name)
     logger = task.get_logger()
     task.execute_remotely(queue_name=config.training.queue)
     task.launch_multi_node(config.num_hosts, wait=True, queue=config.training.queue + '-workers')

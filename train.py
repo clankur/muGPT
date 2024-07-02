@@ -368,7 +368,7 @@ def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHpa
 @dataclass(frozen=True)
 class Paths:
   root_working_dir: str
-  model_name: str
+  model_name: Optional[str]
 
 @dataclass(frozen=True)
 class MeshConfig:
@@ -479,7 +479,7 @@ def main(config):
   if config.training.queue:
     config_name = hydra.core.hydra_config.HydraConfig.get()['job']['config_name']
     task_name = config.paths.model_name
-    if task_name == config_name:
+    if not task_name:
         overrides = hydra.core.hydra_config.HydraConfig.get()['job']['override_dirname']
         overrides = ','.join(overrides.split(',')[2:]).replace("=", ':')
         task_name = f"{config_name}_{overrides}" if overrides else config_name

@@ -482,7 +482,7 @@ def main(config):
     if task_name == config_name:
         overrides = hydra.core.hydra_config.HydraConfig.get()['job']['override_dirname']
         overrides = ','.join(overrides.split(',')[2:]).replace("=", ':')
-        task_name = f"{config_name}_{overrides}"
+        task_name = f"{config_name}_{overrides}" if overrides else config_name
     git_branch_name = subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout.strip()
     task = Task.init(project_name=f'{config_name}/{git_branch_name}', task_name=task_name)
     logger = task.get_logger()

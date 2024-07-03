@@ -26,5 +26,14 @@ model:
   d_ff: 1024 
   vocab: 32768
   rope_max_timescale: 10000
+  base:
+    d_model: 128
+    n_q_per_kv: 1
+    n_kv: 16 
+    d_head: 64 
+    layers: 8
+    d_ff: 1024 
+  a_attn: 1.
+  a_output: 1.
 
 checkpoint_interval: 9200

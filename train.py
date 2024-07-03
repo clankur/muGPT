@@ -409,8 +409,10 @@ def main_contained(config, logger):
 
     loader = get_loader('train', config.training_data, config.training.tokens)
     assert config.model.vocab > loader.max_token_id, f"{config.model.vocab} vs {loader.max_token_id}"
+    config_name = hydra.core.hydra_config.HydraConfig.get()['job']['config_name']
+    model_name = config.paths.model_name if config.paths.model_name else get_model_name(config_name)
     
-    model_dir = os.path.join(config.paths.root_working_dir, config.paths.model_name)
+    model_dir = os.path.join(config.paths.root_working_dir, model_name)
     # training_io.mkdir(model_dir)
     state = jax.jit(partial(State.init, config.model))(fold_in_str(root_rng, 'init'))
     state, start_step = training_io.load_checkpoint_if_it_exists(model_dir, state, config.io)
@@ -472,17 +474,17 @@ def clear_tpu_locks():
     print(f'Error clearing TPU locks: {e}')
     pass
   
+def get_model_name(config_name: str):
+  overrides = hydra.core.hydra_config.HydraConfig.get()['job']['override_dirname']
+  overrides = ','.join(overrides.split(',')[2:]).replace("=", ':')
+  return f"{config_name}_{overrides}" if overrides else config_name
   
 @hydra.main(config_path='configs', version_base=None)
 def main(config):
   config = jax_extra.make_dataclass_from_dict(Config, config)
   if config.training.queue:
     config_name = hydra.core.hydra_config.HydraConfig.get()['job']['config_name']
-    task_name = config.paths.model_name
-    if not task_name:
-        overrides = hydra.core.hydra_config.HydraConfig.get()['job']['override_dirname']
-        overrides = ','.join(overrides.split(',')[2:]).replace("=", ':')
-        task_name = f"{config_name}_{overrides}" if overrides else config_name
+    task_name = config.paths.model_name if config.paths.model_name else get_model_name(config_name)
     git_branch_name = subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout.strip()
     task = Task.init(project_name=f'{config_name}/{git_branch_name}', task_name=task_name)
     logger = task.get_logger()

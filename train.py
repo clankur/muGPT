@@ -92,15 +92,15 @@ class Model:
     base = h.base
 
     # scale for tensors with d_model fan_in and truncated normal truncated to (-2, 2)
-    d_model_scale = 1 / (h.d_model * truncated_normal_stddev)
+    d_model_scale = 1 / (math.sqrt(h.d_model) * truncated_normal_stddev)
 
     w_kv_scale = d_model_scale
     w_q_scale = d_model_scale * h.a_attn * math.sqrt(base.d_head) / h.d_head 
     total_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
-    w_o_scale = 1 / (total_head_dim * truncated_normal_stddev)
+    w_o_scale = 1 / (math.sqrt(total_head_dim) * truncated_normal_stddev)
     w_up_scale = d_model_scale
-    w_down_scale = 1 / (h.d_ff * truncated_normal_stddev)
-    unembed_scale = h.a_output * math.sqrt(base.d_model) * d_model_scale
+    w_down_scale = 1 / (math.sqrt(h.d_ff) * truncated_normal_stddev)
+    unembed_scale = h.a_output * math.sqrt(base.d_model) / h.d_model 
 
     w_kv_shape = (h.layers, 2, h.d_model, h.n_kv, h.d_head)
     w_kv = w_kv_scale * jax.random.truncated_normal(fold_in_str(rng, 'w_kv'), -2, 2, w_kv_shape, dtype=jnp.float32)

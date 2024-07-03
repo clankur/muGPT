@@ -1,4 +1,4 @@
-# python -m train --config-name=c4_a100x8x4_10m_narrow +paths.model_name=270m
+# python -m train --config-name=c4_a100x8x4_10m +paths.model_name=270m
 defaults:
 - c4_a100x8_base
 - _self_

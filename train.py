@@ -333,7 +333,8 @@ def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHpa
       global_norm_square += jnp.sum(jax.lax.square(g))
     global_norm_square = jax.lax.psum(global_norm_square, ('d', 't'))
     global_norm = jnp.sqrt(global_norm_square)
-    rescale = jnp.minimum(1.0, 1.0 / global_norm)
+    # rescale = jnp.minimum(1.0, 1.0 / global_norm)
+    rescale = 1.0
 
     base = h.base
     
@@ -344,7 +345,7 @@ def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHpa
       ln2=1.0,
       w_q=h.d_model/base.d_model,
       w_kv=h.d_model/base.d_model,
-      w_o=h.d_head * h.n_kv * h.n_q_per_kv/base.d_head * base.n_kv * base.n_q_per_kv,
+      w_o=h.d_head * h.n_kv * h.n_q_per_kv/(base.d_head * base.n_kv * base.n_q_per_kv),
       w_gate=h.d_model/base.d_model,
       w_up=h.d_model/base.d_model,
       w_down=h.d_ff/base.d_ff,

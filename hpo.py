@@ -1,133 +1,114 @@
-from clearml.automation import UniformParameterRange, UniformIntegerParameterRange
-from clearml.automation import HyperParameterOptimizer
-from clearml.automation.optuna import OptimizerOptuna
 from clearml import Task
 import numpy as np
 import hydra
-import jax
 import jax_extra
-import os
-from train import clear_locks, Config
+from train import Config
 import subprocess
+from dataclasses import dataclass
+from typing import Optional
 
-args = {
-    "template_task_id": None,
-    "run_as_service": False,
-}
+@dataclass
+class Config:
+    model_name: str
+    queue_name: str
+    project_name: Optional[str] = None
 
-# Get the template task experiment that we want to optimize
-initial_lr_range_log = (
-    np.log10(1e-5),
-    np.log10(1e-1),
-)  # Initial learning rate range in log10 scale
+def get_task_details(config: Config):
+    git_branch_name = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    config_name = hydra.core.hydra_config.HydraConfig.get()["job"]["config_name"]
+    project_name = config.project_name if config.project_name else f"{config_name}/{git_branch_name}"
+    task_name = config.model_name
 
-
-def create_hpo_task(lr_range_log, config: Config):
-    if not args["template_task_id"]:
-        git_branch_name = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        ).stdout.strip()
-        config_name = hydra.core.hydra_config.HydraConfig.get()["job"]["config_name"]
-        project_name = f"{config_name}/{git_branch_name}"
-        task_name = config.paths.model_name
-        
-        print(f"{project_name=}")
-        print(f"{task_name=}")
-        args["template_task_id"] = Task.get_task(
-            project_name=f"{config_name}/main",
-            task_name=config.paths.model_name,
-        ).id
-
-    return HyperParameterOptimizer(
-        base_task_id="2fbbd3a9216d4e9c963b48b70fcebd89",  # 270m base task id
-        hyper_parameters=[
-            UniformParameterRange(
-                "Hydra/training.learning_rate",
-                10 ** lr_range_log[0],
-                10 ** lr_range_log[1],
-            ),
-        ],
-        objective_metric_title='loss',
-        objective_metric_series='loss',
-        objective_metric_sign='min',  
-        max_number_of_concurrent_tasks=2,
-        optimizer_class=OptimizerOptuna,
-        total_max_jobs=10,
-        execution_queue=config.training.queue,
-        min_iteration_per_job=10,
-        max_iteration_per_job=30,
-    )
-
-
-def job_complete_callback(
-    job_id,  # type: str
-    objective_value,  # type: float
-    objective_iteration,  # type: int
-    job_parameters,  # type: dict
-    top_performance_job_id,  # type: str
+    return project_name, task_name
+    
+def lr_sweep_binary_search(
+    config: Config, lower_bound, upper_bound, template_task_id, max_iterations=5 
 ):
-    print(
-        "Job completed!", job_id, objective_value, objective_iteration, job_parameters
-    )
-    if job_id == top_performance_job_id:
-        print(
-            "WOOT WOOT we broke the record! Objective reached {}".format(
-                objective_value
-            )
-        )
+    config_name = hydra.core.hydra_config.HydraConfig.get()["job"]["config_name"]
+    project_name = f"{config_name}/lr_sweep"
+    task_name = f"{config.model_name}_lr_sweep"
+    parent_task = Task.init(project_name=project_name, task_name=task_name)
+    pt_logger = parent_task.get_logger()
+    best_lr = None
+    best_loss = float("inf")
 
+    loss_per_learning_rate = {} 
+    def train (learning_rate, template_task_id):
+        # Clone the template task and override the learning rate
+        child_task = Task.clone(
+            source_task=template_task_id, name=f"{task_name}_lr:{learning_rate:.6f}"
+        )
+        child_task.set_parameter("Hydra/training.learning_rate", learning_rate ) 
+        print(f"training model with lr: {learning_rate}")
+        for i in range(3):
+            try:
+                Task.enqueue(child_task.id, queue_name=config.queue_name)
+                child_task.wait_for_status()
+                break
+            except RuntimeError as e:
+                if i + 1 == 3:
+                    raise e
+                print(e)
+                child_task = Task.clone(
+                    source_task=child_task.id, name=f"{task_name}_lr:{learning_rate:.6f}"
+                )
+
+        # Get the loss from the child task
+        child_task_results = child_task.get_reported_scalars()
+        return child_task_results["loss"]["loss"]["y"][-1]
+  
+    def get_loss (lr):
+        lr = 10 ** lr
+        if lr not in loss_per_learning_rate:
+            loss_per_learning_rate[lr] = train(lr, template_task_id)
+        return loss_per_learning_rate[lr]
+    
+    for i in range(max_iterations): 
+        midpoint = (lower_bound + upper_bound) / 2
+        low_loss, up_loss = get_loss(lower_bound), get_loss(upper_bound)
+        
+        if low_loss < up_loss:
+            upper_bound = midpoint
+            loss, lr = low_loss, lower_bound
+        else:
+            lower_bound = midpoint
+            loss, lr = up_loss, upper_bound
+
+        if loss < best_loss or i == max_iterations -1 :
+            best_loss, best_lr = loss, 10 ** lr
+           
+        pt_logger.report_scalar("loss", "value", loss, iteration=i)
+
+        print(f"Iteration {i+1}: LR = {lr:.6f}, Loss = {loss:.6f}")
+        print(f"Bounds = [{10**lower_bound:.6f}, {10**upper_bound:.6f}]")
+
+        # Check for convergence
+        if np.isclose(lower_bound, upper_bound, rtol=1e-5):
+            break
+
+    print(f"\nBest learning rate found: {best_lr:.6f} with loss: {best_loss:.6f}")
+
+    parent_task.close()
 
 @hydra.main(config_path="configs", version_base=None)
 def main(config):
     config = jax_extra.make_dataclass_from_dict(Config, config)
-    if config.training.queue:
-        # config_name = hydra.core.hydra_config.HydraConfig.get()['job']['config_name']
-        git_branch_name = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        ).stdout.strip()
-
-        task = Task.init(
-            project_name="HPO",
-            task_name=f"Learning rate search {config.paths.model_name}-{git_branch_name}",
-            task_type=Task.TaskTypes.optimizer,
-            reuse_last_task_id=False,
-        )
-
-        an_optimizer = create_hpo_task(initial_lr_range_log, config)
-        # report every 12 seconds, this is way too often, but we are testing here J
-        an_optimizer.set_report_period(30)
-        # start the optimization process, callback function to be called every time an experiment is completed
-        # this function returns immediately
-        an_optimizer.start(job_complete_callback=job_complete_callback)
-
-        # set the time limit for the optimization process (2 hours)
-        an_optimizer.set_time_limit(in_minutes=90.0)
-        # wait until process is done (notice we are controlling the optimization process in the background)
-        an_optimizer.wait()
-        # optimization is completed, print the top performing experiments id
-        top_exp = an_optimizer.get_top_experiments(top_k=3)
-        print([t.id for t in top_exp])
-        # make sure background optimization stopped
-        an_optimizer.stop()
-
-        print("We are done, good bye")
-
-        # Step 4: Finalize
-        task.close()
-
-
+    project_name, task_name = get_task_details(config) 
+    print(f"{project_name=}")
+    print(f"{task_name=}")
+    template_task_id = Task.get_task(
+        project_name=project_name,
+        task_name=task_name,
+    ).id
+ 
+    lower, upper = np.log10(5e-4), np.log10(5e-2)
+    lr_sweep_binary_search(config, lower, upper, template_task_id)
+        
 if __name__ == "__main__":
     main()
-
-
-# Step 2: Define the initial search space in log scale
-
-# Function to create a new HPO task with a specified learning rate range

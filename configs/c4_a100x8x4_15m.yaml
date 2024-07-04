@@ -30,7 +30,7 @@ model:
     d_model: 128
     n_q_per_kv: 1
     n_kv: 16 
-    d_head: 64 
+    d_head: 32
     layers: 8
     d_ff: 1024 
   a_attn: 1.

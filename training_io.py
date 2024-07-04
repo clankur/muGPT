@@ -35,7 +35,9 @@ class IOConfig:
 def log(step: int, logger: Logger, output: PyTree):
   """Logs the output of a training step. The output must be a PyTree of f32 arrays."""
 
-  if int(os.environ['RANK']) == 0 :
+  is_log_process = int(os.environ['RANK']) == 0 if 'RANK' in os.environ else jax.process_index() == 0
+  
+  if is_log_process:
     metrics = {}
     metrics_dict = {}
     for path, arr in jax.tree_util.tree_leaves_with_path(output):

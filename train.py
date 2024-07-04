@@ -3,6 +3,7 @@ import operator
 import os
 import time
 import subprocess
+import signal
 
 import env
 env.set_variables()
@@ -437,6 +438,8 @@ def main_contained(config, logger):
 
     loader = get_loader('train', config.training_data, config.training.tokens)
     assert config.model.vocab > loader.max_token_id, f"{config.model.vocab} vs {loader.max_token_id}"
+    config_name = hydra.core.hydra_config.HydraConfig.get()['job']['config_name']
+    model_name = config.paths.model_name if config.paths.model_name else get_model_name(config_name)
     
     config_name = hydra.core.hydra_config.HydraConfig.get()['job']['config_name']
     model_name = config.paths.model_name if config.paths.model_name else get_model_name(config_name)
@@ -451,8 +454,8 @@ def main_contained(config, logger):
     date = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
     # training_io.save_hlo_svg(os.path.join(model_dir, f'training_step_optimized_hlo_{date}.svg'), c_training_step)
 
-    log_interval = math.ceil(config.training.steps // 5000) 
-    
+    log_interval = math.ceil(config.training.steps / 5000) 
+    print(f'{log_interval=}') 
     for step in range(start_step, config.training.steps):
       # if step % config.checkpoint_interval == 0 and step > start_step:
       #   training_io.save_checkpoint(model_dir, step, state, config.io)
@@ -500,12 +503,11 @@ def clear_tpu_locks():
   except Exception as e:
     print(f'Error clearing TPU locks: {e}')
     pass
-
 def get_model_name(config_name: str):
   overrides = hydra.core.hydra_config.HydraConfig.get()['job']['override_dirname']
   overrides = ','.join(overrides.split(',')[2:]).replace("=", ':')
   return f"{config_name}_{overrides}" if overrides else config_name
-
+  
 @hydra.main(config_path='configs', version_base=None)
 def main(config):
   config = jax_extra.make_dataclass_from_dict(Config, config)

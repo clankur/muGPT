@@ -74,8 +74,6 @@ def lr_sweep(
 
         # Get the loss from the child task
         child_task_results = child_task.get_reported_scalars()
-        # print(f"{child_task_results=}")
-        # print(f"{child_task_results['loss']=}")
 
         return child_task_results["loss"]["loss"]["y"][-1]
 
@@ -98,7 +96,9 @@ def lr_sweep(
             best_lr, best_loss = current_lr, current_loss
         else:
             break
-
+    
+    print("proceeding with binary search now")
+    
     lower_bound, upper_bound = np.log10([best_lr, current_lr])
     while 10**upper_bound - 10**lower_bound > 1e5:
         midpoint = (lower_bound + upper_bound) / 2

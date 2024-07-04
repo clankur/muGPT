@@ -370,7 +370,7 @@ def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHpa
       # Weight decay
       g += hparams.weight_decay * p
       # Learning rate
-      g *= lr * scale
+      g *= lr / scale
 
       # Apply update
       new_ps.append(p - g)

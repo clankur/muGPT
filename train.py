@@ -12,13 +12,14 @@ shardtypes.register_with_typeguard()
 import gcsfs  # Needed for clearml setup
 
 import datetime
+from collections import defaultdict
 from functools import cached_property, partial
 from typing import Any, Optional, Tuple, Union
 import hydra
 from typeguard import typechecked
 from dataclasses import dataclass
 import jax
-from jax import lax
+from jax import Array, lax
 from jax.sharding import PartitionSpec
 import jax.numpy as jnp
 import math
@@ -61,6 +62,9 @@ class Hparams:
   base: BaseWidths
   a_attn: float
   a_output: float
+
+perform_coord_check = True
+ 
  
 @pytree_dataclass
 class Model:
@@ -76,6 +80,13 @@ class Model:
   w_down: f32['layers d_model/d d_ff/t']
   final_layer_norm: f32['d_model/d/t']
 
+  coord_checks_per_activation = defaultdict(lambda: [])
+
+  def save_coord_checks(self, activation: Array, *, name:str) -> None:
+    if perform_coord_check:
+      l1_norm = jnp.sum(jnp.abs(activation))
+      self.coord_checks_per_activation[name].append(l1_norm)
+   
   @staticmethod
   @typechecked
   def init(h: Hparams, rng: PRNGKey) -> 'Model':
@@ -164,10 +175,14 @@ class Model:
       w_q = shardops.all_gather('M/d Q K/t D -> M Q K/t D', jnp.bfloat16(w_q))
       q = save_for_backward(shardops.einsum_unreduced('B/d L M, M Q K/t D -> B/d L Q K/t D', nx, w_q))
       q = rope_table.apply('L D -> 1 L 1 1 D', q)
+      print(f'{q.shape}')
+      jax.debug.callback(self.save_coord_checks, q, name="query") 
       w_kv = shardops.all_gather('2 M/d K/t D -> 2 M K/t D', jnp.bfloat16(w_kv))
       k, v = shardops.einsum_unreduced('B/d L M, k_v M K/t D -> k_v B/d L K/t D', nx, w_kv)
       k = save_for_backward(k)
       v = save_for_backward(v)
+      # jax.debug.callback(self.save_coord_checks, perform_coord_check, k, "key")
+      # jax.debug.callback(self.save_coord_checks, perform_coord_check, v, "value")
       k = rope_table.apply('L d -> 1 L 1 d', k)
       logits = shardops.einsum_unreduced(
         'B/d Qlen Q K/t D, B/d Klen K/t D -> B/d Qlen Klen Q K/t', q, k, preferred_element_type=jnp.float32)
@@ -338,7 +353,7 @@ def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHpa
     rescale = 1.0
 
     base = h.base
-    
+     
     lr_scales = Model(
       embed=1.0,
       unembed=1.0,
@@ -441,8 +456,6 @@ def main_contained(config, logger):
     config_name = hydra.core.hydra_config.HydraConfig.get()['job']['config_name']
     model_name = config.paths.model_name if config.paths.model_name else get_model_name(config_name)
     
-    config_name = hydra.core.hydra_config.HydraConfig.get()['job']['config_name']
-    model_name = config.paths.model_name if config.paths.model_name else get_model_name(config_name)
     model_dir = os.path.join(config.paths.root_working_dir, model_name)
     # training_io.mkdir(model_dir)
     state = jax.jit(partial(State.init, config.model))(fold_in_str(root_rng, 'init'))
@@ -503,6 +516,7 @@ def clear_tpu_locks():
   except Exception as e:
     print(f'Error clearing TPU locks: {e}')
     pass
+ 
 def get_model_name(config_name: str):
   overrides = hydra.core.hydra_config.HydraConfig.get()['job']['override_dirname']
   overrides = ','.join(overrides.split(',')[2:]).replace("=", ':')

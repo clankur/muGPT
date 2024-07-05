@@ -35,5 +35,4 @@ model:
     d_ff: 1024 
   a_attn: 1.
   a_output: 1.
-
 checkpoint_interval: 9200

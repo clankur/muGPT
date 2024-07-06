@@ -6,7 +6,7 @@ defaults:
 num_hosts: 4
 
 mesh:
-  d: 16
+  d: 16 
   t: 1
 
 training:
@@ -26,6 +26,8 @@ model:
   d_ff: 1024 
   vocab: 32768
   rope_max_timescale: 10000
+  a_attn: 1.
+  a_output: 1.
   base:
     d_model: 128
     n_q_per_kv: 1
@@ -33,6 +35,5 @@ model:
     d_head: 32 
     layers: 8
     d_ff: 1024 
-  a_attn: 1.
-  a_output: 1.
+  
 checkpoint_interval: 9200

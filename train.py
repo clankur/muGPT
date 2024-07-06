@@ -475,7 +475,7 @@ def main_contained(config, logger):
       
       # We profile on the second step, because the first step has a long pause for XLA 
       # compilation and initial shuffle buffer loading.
-      if jax.process_index() == 0 and step == start_step + 1:
+      if training_io.is_device_0() and step == start_step + 1:
         jax.block_until_ready(state)
         training_io.start_profile()
         profile_start = time.time()
@@ -483,7 +483,7 @@ def main_contained(config, logger):
       state, output = c_training_step(state, jnp.uint32(step), loader.load(step))
 
       # Run profile for two steps, to include data loading time in between them.
-      if jax.process_index() == 0 and step == start_step + 2:
+      if training_io.is_device_0() and step == start_step + 2:
         jax.block_until_ready(state)
         profile_duration = time.time() - profile_start
         training_io.stop_profile(model_dir)
@@ -534,14 +534,17 @@ def main(config):
     task.execute_remotely(queue_name=config.training.queue)
     task.launch_multi_node(config.num_hosts, wait=True, queue=config.training.queue + '-workers')
     clear_tpu_locks()
-    # if int(os.environ['RANK']) > 0:
-    #   task.set_system_tags((task.get_system_tags() or []) + ['hidden'])
     jax.distributed.initialize(os.environ['MASTER_ADDR'] + ':' + os.environ['MASTER_PORT'],
                         num_processes=int(os.environ['WORLD_SIZE']),
                         process_id=int(os.environ['RANK']))
   else:
     logger = None
   main_contained(config, logger)
-  
+
+  if not training_io.is_device_0():
+      task.set_system_tags((task.get_system_tags() or []) + ['hidden'])
+
+
+
 if __name__ == "__main__":
   main()

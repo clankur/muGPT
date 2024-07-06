@@ -96,11 +96,12 @@ def lr_sweep(
             best_lr, best_loss = current_lr, current_loss
         else:
             break
-    
+
     print("proceeding with binary search now")
-    
+
     lower_bound, upper_bound = np.log10([best_lr, current_lr])
-    while 10**upper_bound - 10**lower_bound > 1e5:
+    while (10**upper_bound / (10**lower_bound)) > 1.1:
+        print(np.abs(10**upper_bound - 10**lower_bound))
         midpoint = (lower_bound + upper_bound) / 2
         loss = get_loss(10**midpoint)
         i += 1

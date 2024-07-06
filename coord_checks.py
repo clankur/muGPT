@@ -56,16 +56,10 @@ def train_model(config, steps):
         date = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
         # training_io.save_hlo_svg(os.path.join(model_dir, f'training_step_optimized_hlo_{date}.svg'), c_training_step)
 
-        log_interval = math.ceil(config.training.steps / 5000)
-        print(f"{log_interval=}")
         for step in range(steps):
-            # if step % config.checkpoint_interval == 0 and step > start_step:
-            #   training_io.save_checkpoint(model_dir, step, state, config.io)
-
-            # We profile on the second step, because the first step has a long pause for XLA
-            # compilation and initial shuffle buffer loading.
             state, output = c_training_step(state, jnp.uint32(step), loader.load(step))
-
+            print("completed step")
+            training_io.log(step, None, output)
         print(f"{state.weights.coord_checks_per_activation}")
 
 
@@ -83,6 +77,7 @@ def main(config ):
     for config_name in config.model_family:
         cfg = hydra.compose(config_name=config_name)
         model_config = make_dataclass_from_dict(ModelConfig, cfg)
+        print(f'training {config_name}')
         train_model(model_config, config.steps) 
 if __name__ == "__main__":
     main()

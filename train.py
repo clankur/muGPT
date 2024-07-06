@@ -163,7 +163,8 @@ class Model:
     ##### Transformer blocks.
     @explicit_activation_checkpointing
     @typechecked
-    def loop_body(x: bf16[b'B/d L M/t'], layer_weights: Any) -> Tuple[bf16[b'B/d L M/t'], Tuple[()]]:
+    def loop_body(carry: Any, layer_weights: Any) -> Tuple[Any, Tuple[()]]:
+      layer_num, x = carry
       w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2  = layer_weights
 
       # Pre-attention RMSNorm
@@ -175,8 +176,7 @@ class Model:
       w_q = shardops.all_gather('M/d Q K/t D -> M Q K/t D', jnp.bfloat16(w_q))
       q = save_for_backward(shardops.einsum_unreduced('B/d L M, M Q K/t D -> B/d L Q K/t D', nx, w_q))
       q = rope_table.apply('L D -> 1 L 1 1 D', q)
-      print(f'{q.shape}')
-      jax.debug.callback(self.save_coord_checks, q, name="query") 
+      # jax.debug.callback(self.save_coord_checks, q, name="query") 
       w_kv = shardops.all_gather('2 M/d K/t D -> 2 M K/t D', jnp.bfloat16(w_kv))
       k, v = shardops.einsum_unreduced('B/d L M, k_v M K/t D -> k_v B/d L K/t D', nx, w_kv)
       k = save_for_backward(k)
@@ -210,9 +210,9 @@ class Model:
       ffn_out = shardops.einsum_unreduced('B/d L F/t, M F/t -> B/d L M', y, w_down)
       ffn_out = shardops.psum_scatter('B/d L M -> B/d L M/t', ffn_out)
 
-      return jnp.bfloat16(x + ffn_out), ()
+      return (layer_num+1, jnp.bfloat16(x + ffn_out)), ()
 
-    x, () = jax.lax.scan(loop_body, jnp.bfloat16(x), (self.w_q, self.w_kv, self.w_o, self.w_gate, self.w_up, self.w_down, self.ln1, self.ln2))
+    (_, x), () = jax.lax.scan(loop_body, (0, jnp.bfloat16(x)), (self.w_q, self.w_kv, self.w_o, self.w_gate, self.w_up, self.w_down, self.ln1, self.ln2))
 
     ##### Final layernorm and output projection.
     x = shardops.all_gather('B/d L M/t -> B/d L M', x)
@@ -322,6 +322,7 @@ class State:
 def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHparams, batch: TokenBatch) -> Tuple[Any, Metrics]:
   @partial(shardtypes.typed_shard_map, check_rep=False)  # check_rep=False for https://github.com/google/jax/issues/20335
   def sharded_step(state: State, step: u32[b''], batch: TokenBatch) -> Tuple[State, Metrics]:
+    print(f'{step=}')
     loss, grad = jax.value_and_grad(lambda weights: weights.loss(h, batch))(state.weights)
     # Gradients have already been reduced across chips because the gradient of the weight `all_gather`
     # is weight-gradient `psum_scatter`. Loss, on the other hand, hasn't been reduced across chips: if we
@@ -330,6 +331,7 @@ def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHpa
     #
     # So we reduce the loss across chips _outside_ the autodiff.
     loss = jax.lax.psum(loss, ('d', 't'))
+    print(f'{loss=}')
 
     # Other than global-norm of gradients, no other communication is needed during the weight update,
     # because weights and grads are already fully sharded, as checked below.
@@ -371,6 +373,7 @@ def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHpa
     new_ps = []
     new_mus = []
     new_nus = []
+    print("applying backprop")
     for p, g, mu, nu, spec, scale in zip(tree_leaves(state.weights), grad_leaves, tree_leaves(state.adam_mu), tree_leaves(state.adam_nu), tree_leaves(shardtypes.make_partition_specs(State)), tree_leaves(lr_scales)):
       assert shardtypes.is_fully_sharded(spec), 'Weight update is only correctly scaled for fully sharded weights.'
       # Gradient clipping
@@ -392,6 +395,7 @@ def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHpa
       new_ps.append(p - g)
       new_mus.append(mu)
       new_nus.append(nu)
+    print('newt_state init')
     
     new_state = State(
       weights=jax.tree_util.tree_unflatten(grad_treedef, new_ps),
@@ -404,8 +408,9 @@ def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHpa
       grad_norm=global_norm * rescale,
       raw_grad_norm=global_norm,
     )
+    print("returning")
     return new_state, metrics
-  
+  print("returning shareded step")
   return sharded_step(state, step, batch)
 
 

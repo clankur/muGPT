@@ -26,8 +26,8 @@ model:
   d_ff: 8192
   vocab: 32768
   rope_max_timescale: 10000
-  a_attn: 1
-  a_output: 1
+  a_attn: 1.
+  a_output: 1.
   base:
     d_model: 256 
     n_q_per_kv: 1

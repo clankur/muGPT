@@ -24,6 +24,11 @@ from jax.lib import xla_client
 
 PyTree = Any
 
+def is_device_0():
+  return int(os.environ['RANK']) == 0 if 'RANK' in os.environ else jax.process_index() == 0
+
+  
+
 @dataclass
 class IOConfig:
   # Max number of threads to use for IO-bound tasks like saving and loading checkpoints.
@@ -34,7 +39,9 @@ class IOConfig:
 
 def log(step: int, logger: Logger, output: PyTree):
   """Logs the output of a training step. The output must be a PyTree of f32 arrays."""
-  if jax.process_index() == 0:
+
+  if is_device_0():
+    metrics = {}
     metrics_dict = {}
     for path, arr in jax.tree_util.tree_leaves_with_path(output):
       path = jax.tree_util.keystr(path)

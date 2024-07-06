@@ -3,6 +3,7 @@ import operator
 import os
 import time
 import subprocess
+import signal
 
 import env
 env.set_variables()
@@ -366,7 +367,7 @@ def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHpa
 @dataclass(frozen=True)
 class Paths:
   root_working_dir: str
-  model_name: str
+  model_name: Optional[str]
 
 @dataclass(frozen=True)
 class MeshConfig:
@@ -407,8 +408,10 @@ def main_contained(config, logger):
 
     loader = get_loader('train', config.training_data, config.training.tokens)
     assert config.model.vocab > loader.max_token_id, f"{config.model.vocab} vs {loader.max_token_id}"
+    config_name = hydra.core.hydra_config.HydraConfig.get()['job']['config_name']
+    model_name = config.paths.model_name if config.paths.model_name else get_model_name(config_name)
     
-    model_dir = os.path.join(config.paths.root_working_dir, config.paths.model_name)
+    model_dir = os.path.join(config.paths.root_working_dir, model_name)
     # training_io.mkdir(model_dir)
     state = jax.jit(partial(State.init, config.model))(fold_in_str(root_rng, 'init'))
     state, start_step = training_io.load_checkpoint_if_it_exists(model_dir, state, config.io)
@@ -419,15 +422,15 @@ def main_contained(config, logger):
     date = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
     # training_io.save_hlo_svg(os.path.join(model_dir, f'training_step_optimized_hlo_{date}.svg'), c_training_step)
 
-    log_interval = config.training.steps // 5000
-    
+    log_interval = math.ceil(config.training.steps / 5000) 
+    print(f'{log_interval=}') 
     for step in range(start_step, config.training.steps):
       # if step % config.checkpoint_interval == 0 and step > start_step:
       #   training_io.save_checkpoint(model_dir, step, state, config.io)
       
       # We profile on the second step, because the first step has a long pause for XLA 
       # compilation and initial shuffle buffer loading.
-      if jax.process_index() == 0 and step == start_step + 1:
+      if training_io.is_device_0() and step == start_step + 1:
         jax.block_until_ready(state)
         training_io.start_profile()
         profile_start = time.time()
@@ -435,7 +438,7 @@ def main_contained(config, logger):
       state, output = c_training_step(state, jnp.uint32(step), loader.load(step))
 
       # Run profile for two steps, to include data loading time in between them.
-      if jax.process_index() == 0 and step == start_step + 2:
+      if training_io.is_device_0() and step == start_step + 2:
         jax.block_until_ready(state)
         profile_duration = time.time() - profile_start
         training_io.stop_profile(model_dir)
@@ -453,43 +456,49 @@ def main_contained(config, logger):
       if log_interval == 0 or step % log_interval == 0: 
         training_io.log(step, logger, output)
 
-def clear_locks():
+def clear_tpu_locks():
   try:
-    process = subprocess.run(['sudo', 'lsof', '-w', '/dev/accel0'], capture_output=True, text=True)
-    output = process.stdout
+    raw_pids = subprocess.run(['lsof', '-w', '/dev/accel0'], capture_output=True, text=True).stdout
     pids = set()
-    for line in output.splitlines()[1:]:  # Skip the header line
+    for line in raw_pids.splitlines()[1:]:  
       parts = line.split()
       if len(parts) > 1:
         pids.add(parts[1])
-    
-    print(f"pids {pids}")
     for pid in pids:
-      subprocess.run(['sudo', 'kill', '-9', pid])
+      os.kill(int(pid), signal.SIGTERM)
     if pids:
-      subprocess.run(['sudo', 'rm', '/tmp/libtpu_lockfile'])
-  except:
+      os.remove('/tmp/libtpu_lockfile')
+  except Exception as e:
+    print(f'Error clearing TPU locks: {e}')
     pass
-
+  
+def get_model_name(config_name: str):
+  overrides = hydra.core.hydra_config.HydraConfig.get()['job']['override_dirname']
+  overrides = ','.join(overrides.split(',')[2:]).replace("=", ':')
+  return f"{config_name}_{overrides}" if overrides else config_name
+  
 @hydra.main(config_path='configs', version_base=None)
 def main(config):
   config = jax_extra.make_dataclass_from_dict(Config, config)
   if config.training.queue:
     config_name = hydra.core.hydra_config.HydraConfig.get()['job']['config_name']
+    task_name = config.paths.model_name if config.paths.model_name else get_model_name(config_name)
     git_branch_name = subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout.strip()
-    task = Task.init(project_name=f'{config_name}/{git_branch_name}', task_name=config.paths.model_name)
+    task = Task.init(project_name=f'{config_name}/{git_branch_name}', task_name=task_name)
     logger = task.get_logger()
     task.execute_remotely(queue_name=config.training.queue)
     task.launch_multi_node(config.num_hosts, wait=True, queue=config.training.queue + '-workers')
-    clear_locks()
-    # if int(os.environ['RANK']) > 0:
-    #   task.set_system_tags((task.get_system_tags() or []) + ['hidden'])
+    clear_tpu_locks()
     jax.distributed.initialize(os.environ['MASTER_ADDR'] + ':' + os.environ['MASTER_PORT'],
                         num_processes=int(os.environ['WORLD_SIZE']),
                         process_id=int(os.environ['RANK']))
   else:
     logger = None
   main_contained(config, logger)
+
+  if not training_io.is_device_0():
+      task.set_system_tags((task.get_system_tags() or []) + ['hidden'])
+
 
 
 if __name__ == "__main__":

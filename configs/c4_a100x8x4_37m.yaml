@@ -13,7 +13,7 @@ training:
   warmup_steps: 290 
   steps:        2900 
   steps_for_lr: 2900 
-  learning_rate: 3.0e-2
+  learning_rate: 7.3e-3
   tokens:
     batch: 256
 
@@ -26,6 +26,8 @@ model:
   d_ff: 2048 
   vocab: 32768
   rope_max_timescale: 10000
+  a_attn: 1.
+  a_output: 1.
   base:
     d_model: 128
     n_q_per_kv: 1
@@ -33,6 +35,5 @@ model:
     d_head: 32 
     layers: 8
     d_ff: 1024 
-  a_attn: 1.
-  a_output: 1.
+
 checkpoint_interval: 9200

@@ -6,14 +6,14 @@ defaults:
 num_hosts: 4
 
 mesh:
-  d: 16
+  d: 16 
   t: 1
 
 training:
   warmup_steps: 2300
   steps:        23000
   steps_for_lr: 23000
-  learning_rate: 3.0e-4
+  learning_rate: 7.3e-3
   tokens:
     batch: 256
 
@@ -28,13 +28,12 @@ model:
   rope_max_timescale: 10000
   a_attn: 1
   a_output: 1
-
   base:
-    d_model: 1024
+    d_model: 256 
     n_q_per_kv: 1
-    n_kv: 16
-    d_head: 128
+    n_kv: 16 
+    d_head: 64 
     layers: 8
-    d_ff: 8182
-
+    d_ff: 2048
+  
 checkpoint_interval: 9200

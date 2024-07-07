@@ -210,9 +210,10 @@ class Model:
       ffn_out = shardops.einsum_unreduced('B/d L F/t, M F/t -> B/d L M', y, w_down)
       ffn_out = shardops.psum_scatter('B/d L M -> B/d L M/t', ffn_out)
 
-      return (layer_num+1, jnp.bfloat16(x + ffn_out)), ()
+      return (layer_num+1, jnp.bfloat16(x + ffn_out)), () # coord_check metrics as 2nd tuple
 
-    (_, x), () = jax.lax.scan(loop_body, (0, jnp.bfloat16(x)), (self.w_q, self.w_kv, self.w_o, self.w_gate, self.w_up, self.w_down, self.ln1, self.ln2))
+    (_, x), layer_metrics = jax.lax.scan(loop_body, (0, jnp.bfloat16(x)), (self.w_q, self.w_kv, self.w_o, self.w_gate, self.w_up, self.w_down, self.ln1, self.ln2))
+    print(f'{layer_metrics}')
 
     ##### Final layernorm and output projection.
     x = shardops.all_gather('B/d L M/t -> B/d L M', x)
@@ -221,7 +222,7 @@ class Model:
     unembed = shardops.all_gather('V/t M/d -> V/t M', jnp.bfloat16(self.unembed))
     logits = shardops.einsum_unreduced('B/d L M, V/t M -> B/d L V/t', x, unembed, preferred_element_type=jnp.float32)
 
-    return logits
+    return logits # todo: return layer metrics
 
 
   @typechecked
@@ -236,7 +237,7 @@ class Model:
     is_seq_start: bool_[b'batch/d len'] = batch.is_seq_start
     inputs: u32[b'batch/d len'] = jnp.where(is_seq_start, 0, inputs)
 
-    logits: f32[b'batch/d len V/t'] = self.forward_pass(h, inputs, is_seq_start)
+    logits: f32[b'batch/d len V/t'] = self.forward_pass(h, inputs, is_seq_start) # add layer_metrics 
     max_logits: f32[b'batch/d len 1'] = lax.pmax(jnp.max(lax.stop_gradient(logits), axis=-1, keepdims=True), 't')
     logits = logits - max_logits
     sum_logits = lax.psum(jnp.sum(jnp.exp(logits), axis=-1, keepdims=True), 't')
@@ -245,7 +246,7 @@ class Model:
     logprobs_at_targets = shardops.index_unreduced('batch/d len [V/t], batch/d len -> batch/d len', logprobs, batch.targets)
     logprobs_at_targets = shardops.psum_scatter('batch/d len -> batch/d len/t', logprobs_at_targets)
     tokens_in_global_batch = logprobs_at_targets.size * jax.lax.psum(1, ('d', 't'))
-    return -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch)
+    return -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch) # add layer metrics
 
 
 @pytree_dataclass
@@ -323,7 +324,7 @@ def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHpa
   @partial(shardtypes.typed_shard_map, check_rep=False)  # check_rep=False for https://github.com/google/jax/issues/20335
   def sharded_step(state: State, step: u32[b''], batch: TokenBatch) -> Tuple[State, Metrics]:
     print(f'{step=}')
-    loss, grad = jax.value_and_grad(lambda weights: weights.loss(h, batch))(state.weights)
+    loss, grad = jax.value_and_grad(lambda weights: weights.loss(h, batch))(state.weights) # TODO: have to add have_aux = True, unpack loss and metrics
     # Gradients have already been reduced across chips because the gradient of the weight `all_gather`
     # is weight-gradient `psum_scatter`. Loss, on the other hand, hasn't been reduced across chips: if we
     # did that inside the autodiff, we'd be double-reducing the loss, effectively multiplying it by the 
@@ -403,6 +404,7 @@ def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHpa
       adam_nu=jax.tree_util.tree_unflatten(grad_treedef, new_nus),
     )
     metrics = Metrics(
+      # add per layer metrics
       loss=loss,
       learning_rate=lr,
       grad_norm=global_norm * rescale,

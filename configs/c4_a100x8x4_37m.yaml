@@ -29,11 +29,11 @@ model:
   a_attn: 1.
   a_output: 1.
   base:
-    d_model: 128
+    d_model: 256 
     n_q_per_kv: 1
     n_kv: 16 
-    d_head: 32 
+    d_head: 64
     layers: 8
-    d_ff: 1024 
+    d_ff: 2048
 
 checkpoint_interval: 9200

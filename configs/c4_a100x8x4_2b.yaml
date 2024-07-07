@@ -36,5 +36,4 @@ model:
     layers: 8
     d_ff: 2048
  
-
 checkpoint_interval: 2500

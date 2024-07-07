@@ -82,11 +82,7 @@ class Model:
 
   coord_checks_per_activation = defaultdict(lambda: [])
 
-  def save_coord_checks(self, activation: Array, *, name:str) -> None:
-    if perform_coord_check:
-      l1_norm = jnp.sum(jnp.abs(activation))
-      self.coord_checks_per_activation[name].append(l1_norm)
-   
+  
   @staticmethod
   @typechecked
   def init(h: Hparams, rng: PRNGKey) -> 'Model':
@@ -176,13 +172,10 @@ class Model:
       q = save_for_backward(shardops.einsum_unreduced('B/d L M, M Q K/t D -> B/d L Q K/t D', nx, w_q))
       q = rope_table.apply('L D -> 1 L 1 1 D', q)
       print(f'{q.shape}')
-      jax.debug.callback(self.save_coord_checks, q, name="query") 
       w_kv = shardops.all_gather('2 M/d K/t D -> 2 M K/t D', jnp.bfloat16(w_kv))
       k, v = shardops.einsum_unreduced('B/d L M, k_v M K/t D -> k_v B/d L K/t D', nx, w_kv)
       k = save_for_backward(k)
       v = save_for_backward(v)
-      # jax.debug.callback(self.save_coord_checks, perform_coord_check, k, "key")
-      # jax.debug.callback(self.save_coord_checks, perform_coord_check, v, "value")
       k = rope_table.apply('L d -> 1 L 1 d', k)
       logits = shardops.einsum_unreduced(
         'B/d Qlen Q K/t D, B/d Klen K/t D -> B/d Qlen Klen Q K/t', q, k, preferred_element_type=jnp.float32)

@@ -80,12 +80,15 @@ class Model:
   w_down: f32['layers d_model/d d_ff/t']
   final_layer_norm: f32['d_model/d/t']
 
-  coord_checks_per_activation = defaultdict(lambda: [])
 
-  def save_coord_checks(self, activation: Array, *, name:str) -> None:
-    if perform_coord_check:
-      l1_norm = jnp.sum(jnp.abs(activation))
-      self.coord_checks_per_activation[name].append(l1_norm)
+  # l1_norm = 
+  def get_layer_metrics (self, activations):
+    q, k, v = activations
+    return LayerMetrics(
+      query = jnp.sum(jnp.abs(q)),
+      key = jnp.sum(jnp.abs(k)),
+      value = jnp.sum(jnp.abs(v))
+    )
    
   @staticmethod
   @typechecked
@@ -163,8 +166,7 @@ class Model:
     ##### Transformer blocks.
     @explicit_activation_checkpointing
     @typechecked
-    def loop_body(carry: Any, layer_weights: Any) -> Tuple[Any, Tuple[()]]:
-      layer_num, x = carry
+    def loop_body(x: bf16[b'B/d L M/t'], layer_weights: Any) -> Tuple[Any, Any]:
       w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2  = layer_weights
 
       # Pre-attention RMSNorm
@@ -176,14 +178,18 @@ class Model:
       w_q = shardops.all_gather('M/d Q K/t D -> M Q K/t D', jnp.bfloat16(w_q))
       q = save_for_backward(shardops.einsum_unreduced('B/d L M, M Q K/t D -> B/d L Q K/t D', nx, w_q))
       q = rope_table.apply('L D -> 1 L 1 1 D', q)
-      # jax.debug.callback(self.save_coord_checks, q, name="query") 
       w_kv = shardops.all_gather('2 M/d K/t D -> 2 M K/t D', jnp.bfloat16(w_kv))
       k, v = shardops.einsum_unreduced('B/d L M, k_v M K/t D -> k_v B/d L K/t D', nx, w_kv)
       k = save_for_backward(k)
       v = save_for_backward(v)
-      # jax.debug.callback(self.save_coord_checks, perform_coord_check, k, "key")
-      # jax.debug.callback(self.save_coord_checks, perform_coord_check, v, "value")
+
       k = rope_table.apply('L d -> 1 L 1 d', k)
+      layer_metrics = LayerMetrics(
+        query = jnp.sum(jnp.abs(q)),
+        key = jnp.sum(jnp.abs(k)),
+        value = jnp.sum(jnp.abs(v))
+      )
+
       logits = shardops.einsum_unreduced(
         'B/d Qlen Q K/t D, B/d Klen K/t D -> B/d Qlen Klen Q K/t', q, k, preferred_element_type=jnp.float32)
       logits = jnp.where(causal_mask, logits, -1e10)
@@ -210,10 +216,11 @@ class Model:
       ffn_out = shardops.einsum_unreduced('B/d L F/t, M F/t -> B/d L M', y, w_down)
       ffn_out = shardops.psum_scatter('B/d L M -> B/d L M/t', ffn_out)
 
-      return (layer_num+1, jnp.bfloat16(x + ffn_out)), () # coord_check metrics as 2nd tuple
+      return (jnp.bfloat16(x + ffn_out)), layer_metrics # TODO: coord_check metrics as 2nd tuple
 
-    (_, x), layer_metrics = jax.lax.scan(loop_body, (0, jnp.bfloat16(x)), (self.w_q, self.w_kv, self.w_o, self.w_gate, self.w_up, self.w_down, self.ln1, self.ln2))
-    print(f'{layer_metrics}')
+    x, layer_metrics = jax.lax.scan(loop_body, jnp.bfloat16(x), (self.w_q, self.w_kv, self.w_o, self.w_gate, self.w_up, self.w_down, self.ln1, self.ln2))
+    jax.debug.print('layer metrics: {layer_metrics}', layer_metrics=layer_metrics)
+    print(f'{type(layer_metrics)=}')
 
     ##### Final layernorm and output projection.
     x = shardops.all_gather('B/d L M/t -> B/d L M', x)
@@ -222,7 +229,7 @@ class Model:
     unembed = shardops.all_gather('V/t M/d -> V/t M', jnp.bfloat16(self.unembed))
     logits = shardops.einsum_unreduced('B/d L M, V/t M -> B/d L V/t', x, unembed, preferred_element_type=jnp.float32)
 
-    return logits # todo: return layer metrics
+    return logits # TODO: return layer metrics
 
 
   @typechecked
@@ -289,6 +296,11 @@ class Metrics:
   grad_norm: f32[b'']
   raw_grad_norm: f32[b'']
 
+@pytree_dataclass
+class LayerMetrics:
+  query: f32[b'']
+  key: f32[b'']
+  value: f32[b'']
 
 @dataclass(frozen=True)
 class TrainingHparams:
@@ -390,13 +402,12 @@ def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHpa
       # Weight decay
       g += hparams.weight_decay * p
       # Learning rate
-      g *= lr / scale
+      g *= lr
 
       # Apply update
       new_ps.append(p - g)
       new_mus.append(mu)
       new_nus.append(nu)
-    print('newt_state init')
     
     new_state = State(
       weights=jax.tree_util.tree_unflatten(grad_treedef, new_ps),
@@ -404,15 +415,13 @@ def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHpa
       adam_nu=jax.tree_util.tree_unflatten(grad_treedef, new_nus),
     )
     metrics = Metrics(
-      # add per layer metrics
       loss=loss,
       learning_rate=lr,
       grad_norm=global_norm * rescale,
       raw_grad_norm=global_norm,
     )
-    print("returning")
     return new_state, metrics
-  print("returning shareded step")
+  
   return sharded_step(state, step, batch)
 
 
@@ -474,8 +483,19 @@ def main_contained(config, logger):
     date = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
     # training_io.save_hlo_svg(os.path.join(model_dir, f'training_step_optimized_hlo_{date}.svg'), c_training_step)
 
+      
     log_interval = math.ceil(config.training.steps / 5000) 
     print(f'{log_interval=}') 
+
+    cum_metrics = None 
+
+    def update_metrics(metrics: Metrics):
+      nonlocal cum_metrics
+      cum_metrics.loss += metrics.loss
+      cum_metrics.grad_norm += metrics.grad_norm
+      cum_metrics.raw_grad_norm += metrics.raw_grad_norm
+      cum_metrics.learning_rate += metrics.learning_rate
+      
     for step in range(start_step, config.training.steps):
       # if step % config.checkpoint_interval == 0 and step > start_step:
       #   training_io.save_checkpoint(model_dir, step, state, config.io)
@@ -505,8 +525,20 @@ def main_contained(config, logger):
         num_devices = jax.device_count()
         print(f'MFU (projections only): {100 * (2 * 6 * model_params * tokens / (num_devices * profile_duration)) / device_flops:.2f}% MFU')
 
-      if log_interval == 0 or step % log_interval == 0: 
-        training_io.log(step, logger, output)
+      if step % log_interval == 0: 
+        if cum_metrics:
+            cum_metrics = Metrics(
+              loss=cum_metrics.loss / log_interval, 
+            learning_rate=cum_metrics.learning_rate / log_interval, 
+            grad_norm=cum_metrics.grad_norm / log_interval,
+            raw_grad_norm=cum_metrics.raw_grad_norm / log_interval
+          )
+        else:
+          cum_metrics = output
+        training_io.log(step, logger, cum_metrics)
+        cum_metrics = output 
+      else:
+        update_metrics(output) 
 
 def clear_tpu_locks():
   try:
@@ -523,7 +555,7 @@ def clear_tpu_locks():
   except Exception as e:
     print(f'Error clearing TPU locks: {e}')
     pass
- 
+  
 def get_model_name(config_name: str):
   overrides = hydra.core.hydra_config.HydraConfig.get()['job']['override_dirname']
   overrides = ','.join(overrides.split(',')[2:]).replace("=", ':')

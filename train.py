@@ -508,6 +508,7 @@ def main_contained(config, logger):
         profile_start = time.time()
 
       state, output = c_training_step(state, jnp.uint32(step), loader.load(step))
+      output
 
       # Run profile for two steps, to include data loading time in between them.
       if training_io.is_device_0() and step == start_step + 2:

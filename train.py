@@ -63,9 +63,12 @@ class Hparams:
   a_attn: float
   a_output: float
 
-perform_coord_check = True
- 
- 
+@pytree_dataclass
+class LayerMetrics:
+  query: f32[b'layers']
+  key: f32[b'layers']
+  value: f32[b'layers']
+
 @pytree_dataclass
 class Model:
   embed: f32['vocab/t d_model/d']
@@ -81,15 +84,6 @@ class Model:
   final_layer_norm: f32['d_model/d/t']
 
 
-  # l1_norm = 
-  def get_layer_metrics (self, activations):
-    q, k, v = activations
-    return LayerMetrics(
-      query = jnp.sum(jnp.abs(q)),
-      key = jnp.sum(jnp.abs(k)),
-      value = jnp.sum(jnp.abs(v))
-    )
-   
   @staticmethod
   @typechecked
   def init(h: Hparams, rng: PRNGKey) -> 'Model':
@@ -148,7 +142,7 @@ class Model:
 
 
   @typechecked
-  def forward_pass(self, h: Hparams, ids: u32[b'B/d L'], is_seq_start: bool_[b'B/d L']) -> f32[b'B/d L V/t']:
+  def forward_pass(self, h: Hparams, ids: u32[b'B/d L'], is_seq_start: bool_[b'B/d L']) -> Tuple[f32[b'B/d L V/t'], Any]:
     ##### Initial embedding lookup.
     embed = shardops.all_gather('V/t M/d -> V/t M', jnp.bfloat16(self.embed))
     x = shardops.index_unreduced('[V/t] M, B/d L -> B/d L M', embed, ids)
@@ -165,8 +159,7 @@ class Model:
 
     ##### Transformer blocks.
     @explicit_activation_checkpointing
-    @typechecked
-    def loop_body(x: bf16[b'B/d L M/t'], layer_weights: Any) -> Tuple[Any, Any]:
+    def loop_body(x: bf16[b'B/d L M/t'], layer_weights: Any) -> Tuple[bf16[b'B/d L M/t'], LayerMetrics]:
       w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2  = layer_weights
 
       # Pre-attention RMSNorm
@@ -184,10 +177,11 @@ class Model:
       v = save_for_backward(v)
 
       k = rope_table.apply('L d -> 1 L 1 d', k)
+
       layer_metrics = LayerMetrics(
-        query = jnp.sum(jnp.abs(q)),
-        key = jnp.sum(jnp.abs(k)),
-        value = jnp.sum(jnp.abs(v))
+        query = jnp.sum(jnp.abs(q.astype(jnp.float32))),
+        key = jnp.sum(jnp.abs(k.astype(jnp.float32))),
+        value = jnp.sum(jnp.abs(v.astype(jnp.float32)))
       )
 
       logits = shardops.einsum_unreduced(
@@ -216,11 +210,9 @@ class Model:
       ffn_out = shardops.einsum_unreduced('B/d L F/t, M F/t -> B/d L M', y, w_down)
       ffn_out = shardops.psum_scatter('B/d L M -> B/d L M/t', ffn_out)
 
-      return (jnp.bfloat16(x + ffn_out)), layer_metrics # TODO: coord_check metrics as 2nd tuple
+      return jnp.bfloat16(x + ffn_out), layer_metrics 
 
     x, layer_metrics = jax.lax.scan(loop_body, jnp.bfloat16(x), (self.w_q, self.w_kv, self.w_o, self.w_gate, self.w_up, self.w_down, self.ln1, self.ln2))
-    jax.debug.print('layer metrics: {layer_metrics}', layer_metrics=layer_metrics)
-    print(f'{type(layer_metrics)=}')
 
     ##### Final layernorm and output projection.
     x = shardops.all_gather('B/d L M/t -> B/d L M', x)
@@ -229,11 +221,11 @@ class Model:
     unembed = shardops.all_gather('V/t M/d -> V/t M', jnp.bfloat16(self.unembed))
     logits = shardops.einsum_unreduced('B/d L M, V/t M -> B/d L V/t', x, unembed, preferred_element_type=jnp.float32)
 
-    return logits # TODO: return layer metrics
+    return logits, layer_metrics 
 
 
   @typechecked
-  def loss(self, h: Hparams, batch: TokenBatch) -> f32[b'']:
+  def loss(self, h: Hparams, batch: TokenBatch) -> Tuple[f32[b''], LayerMetrics]:
     # Given sequence-packed targets:
     #   [[1, 2], [3, 4, 5], [6, 7, 8, 9]]
     # we want inputs:
@@ -244,7 +236,11 @@ class Model:
     is_seq_start: bool_[b'batch/d len'] = batch.is_seq_start
     inputs: u32[b'batch/d len'] = jnp.where(is_seq_start, 0, inputs)
 
-    logits: f32[b'batch/d len V/t'] = self.forward_pass(h, inputs, is_seq_start) # add layer_metrics 
+    logits, layer_metrics = self.forward_pass(h, inputs, is_seq_start) # add layer_metrics 
+    
+
+    logits: f32[b'batch/d len V/t'] = logits
+
     max_logits: f32[b'batch/d len 1'] = lax.pmax(jnp.max(lax.stop_gradient(logits), axis=-1, keepdims=True), 't')
     logits = logits - max_logits
     sum_logits = lax.psum(jnp.sum(jnp.exp(logits), axis=-1, keepdims=True), 't')
@@ -253,7 +249,7 @@ class Model:
     logprobs_at_targets = shardops.index_unreduced('batch/d len [V/t], batch/d len -> batch/d len', logprobs, batch.targets)
     logprobs_at_targets = shardops.psum_scatter('batch/d len -> batch/d len/t', logprobs_at_targets)
     tokens_in_global_batch = logprobs_at_targets.size * jax.lax.psum(1, ('d', 't'))
-    return -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch) # add layer metrics
+    return -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch), layer_metrics 
 
 
 @pytree_dataclass
@@ -296,12 +292,6 @@ class Metrics:
   grad_norm: f32[b'']
   raw_grad_norm: f32[b'']
 
-@pytree_dataclass
-class LayerMetrics:
-  query: f32[b'']
-  key: f32[b'']
-  value: f32[b'']
-
 @dataclass(frozen=True)
 class TrainingHparams:
   adam_b1: float
@@ -332,11 +322,13 @@ class State:
     return State(weights=weights, adam_mu=adam_mu, adam_nu=adam_nu)
 
 @partial(jax.jit, static_argnums=(2, 3), donate_argnums=(0,))
-def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHparams, batch: TokenBatch) -> Tuple[Any, Metrics]:
+def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHparams, batch: TokenBatch) -> Tuple[Any, Metrics, LayerMetrics]:
   @partial(shardtypes.typed_shard_map, check_rep=False)  # check_rep=False for https://github.com/google/jax/issues/20335
-  def sharded_step(state: State, step: u32[b''], batch: TokenBatch) -> Tuple[State, Metrics]:
+  def sharded_step(state: State, step: u32[b''], batch: TokenBatch) -> Tuple[State, Metrics, LayerMetrics]:
     print(f'{step=}')
-    loss, grad = jax.value_and_grad(lambda weights: weights.loss(h, batch))(state.weights) # TODO: have to add have_aux = True, unpack loss and metrics
+    ( loss, layer_metrics), grad = jax.value_and_grad(lambda weights: weights.loss(h, batch), has_aux=True)(state.weights) # TODO: have to add have_aux = True, unpack loss and metrics
+    # jax.debug.print('layer metrics: {layer_metrics}', layer_metrics=layer_metrics)
+
     # Gradients have already been reduced across chips because the gradient of the weight `all_gather`
     # is weight-gradient `psum_scatter`. Loss, on the other hand, hasn't been reduced across chips: if we
     # did that inside the autodiff, we'd be double-reducing the loss, effectively multiplying it by the 
@@ -420,7 +412,7 @@ def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHpa
       grad_norm=global_norm * rescale,
       raw_grad_norm=global_norm,
     )
-    return new_state, metrics
+    return new_state, metrics, layer_metrics
   
   return sharded_step(state, step, batch)
 
@@ -457,89 +449,109 @@ class Config:
     return self.flat_tokens or self.hf_dataset
 
 def main_contained(config, logger):
-  """Main program, which does not access external services except as specified by config.paths or logger."""
-  # Use partitionable (and hopefully fusable!) RNG.
-  #
-  # This is slower in compute time than 'unsafe_rbg' with flag '--xla_tpu_spmd_rng_bit_generator_unsafe=true',
-  # but hopefully faster in memory time because it's fusable.
-  # TODO: check this is true and if not, provide our own that actually is fusable.
-  jax.config.update('jax_threefry_partitionable', True)
-  with Mesh(mesh_utils.create_device_mesh([config.mesh.d, config.mesh.t], jax.devices()), ('d', 't')):
-    root_rng = jax.random.PRNGKey(config.training.seed)
+    """Main program, which does not access external services except as specified by config.paths or logger."""
+    # Use partitionable (and hopefully fusable!) RNG.
+    #
+    # This is slower in compute time than 'unsafe_rbg' with flag '--xla_tpu_spmd_rng_bit_generator_unsafe=true',
+    # but hopefully faster in memory time because it's fusable.
+    # TODO: check this is true and if not, provide our own that actually is fusable.
+    jax.config.update("jax_threefry_partitionable", True)
+    with Mesh(
+        mesh_utils.create_device_mesh([config.mesh.d, config.mesh.t], jax.devices()),
+        ("d", "t"),
+    ):
+        root_rng = jax.random.PRNGKey(config.training.seed)
 
-    loader = get_loader('train', config.training_data, config.training.tokens)
-    assert config.model.vocab > loader.max_token_id, f"{config.model.vocab} vs {loader.max_token_id}"
-    config_name = hydra.core.hydra_config.HydraConfig.get()['job']['config_name']
-    model_name = config.paths.model_name if config.paths.model_name else get_model_name(config_name)
-    
-    model_dir = os.path.join(config.paths.root_working_dir, model_name)
-    # training_io.mkdir(model_dir)
-    state = jax.jit(partial(State.init, config.model))(fold_in_str(root_rng, 'init'))
-    state, start_step = training_io.load_checkpoint_if_it_exists(model_dir, state, config.io)
+        loader = get_loader("train", config.training_data, config.training.tokens)
+        assert (
+            config.model.vocab > loader.max_token_id
+        ), f"{config.model.vocab} vs {loader.max_token_id}"
+        config_name = hydra.core.hydra_config.HydraConfig.get()["job"]["config_name"]
+        model_name = (
+            config.paths.model_name
+            if config.paths.model_name
+            else get_model_name(config_name)
+        )
 
-    # Explicitly compile training step, to record XLA HLO graph.
-    # See https://bnikolic.co.uk/blog/python/jax/2022/02/22/jax-outputgraph-rev
-    c_training_step = training_step.lower(state, jnp.uint32(0), config.model, config.training, loader.load(0)).compile()
-    date = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-    # training_io.save_hlo_svg(os.path.join(model_dir, f'training_step_optimized_hlo_{date}.svg'), c_training_step)
+        model_dir = os.path.join(config.paths.root_working_dir, model_name)
+        # training_io.mkdir(model_dir)
+        state = jax.jit(partial(State.init, config.model))(
+            fold_in_str(root_rng, "init")
+        )
+        state, start_step = training_io.load_checkpoint_if_it_exists(
+            model_dir, state, config.io
+        )
 
-      
-    log_interval = math.ceil(config.training.steps / 5000) 
-    print(f'{log_interval=}') 
+        # Explicitly compile training step, to record XLA HLO graph.
+        # See https://bnikolic.co.uk/blog/python/jax/2022/02/22/jax-outputgraph-rev
+        c_training_step = training_step.lower(
+            state, jnp.uint32(0), config.model, config.training, loader.load(0)
+        ).compile()
+        date = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+        # training_io.save_hlo_svg(os.path.join(model_dir, f'training_step_optimized_hlo_{date}.svg'), c_training_step)
 
-    cum_metrics = None 
+        log_interval = math.ceil(config.training.steps / 5000)
+        print(f"{log_interval=}")
 
-    def update_metrics(metrics: Metrics):
-      nonlocal cum_metrics
-      cum_metrics.loss += metrics.loss
-      cum_metrics.grad_norm += metrics.grad_norm
-      cum_metrics.raw_grad_norm += metrics.raw_grad_norm
-      cum_metrics.learning_rate += metrics.learning_rate
-      
-    for step in range(start_step, config.training.steps):
-      # if step % config.checkpoint_interval == 0 and step > start_step:
-      #   training_io.save_checkpoint(model_dir, step, state, config.io)
-      
-      # We profile on the second step, because the first step has a long pause for XLA 
-      # compilation and initial shuffle buffer loading.
-      if training_io.is_device_0() and step == start_step + 1:
-        jax.block_until_ready(state)
-        training_io.start_profile()
-        profile_start = time.time()
+        cum_metrics = None
 
-      state, output = c_training_step(state, jnp.uint32(step), loader.load(step))
-      output
+        def update_metrics(metrics: Metrics):
+            nonlocal cum_metrics
+            cum_metrics.loss += metrics.loss
+            cum_metrics.grad_norm += metrics.grad_norm
+            cum_metrics.raw_grad_norm += metrics.raw_grad_norm
+            cum_metrics.learning_rate += metrics.learning_rate
 
-      # Run profile for two steps, to include data loading time in between them.
-      if training_io.is_device_0() and step == start_step + 2:
-        jax.block_until_ready(state)
-        profile_duration = time.time() - profile_start
-        training_io.stop_profile(model_dir)
+        for step in range(start_step, config.training.steps):
+            # if step % config.checkpoint_interval == 0 and step > start_step:
+            #   training_io.save_checkpoint(model_dir, step, state, config.io)
 
-        # Print MFU, including (one step of) data loading time.
-        print(f"Profile time: {profile_duration}s for 2 steps.")
-        model_params = jax.tree.reduce(operator.add, jax.tree.map(lambda w: w.size, state.weights))
-        tokens = config.training.tokens.batch * config.training.tokens.len
-        print(f'Model params: {model_params:_}')
-        print(f'Tokens: {tokens:_}')
-        device_flops = training_io.get_flops_per_device()
-        num_devices = jax.device_count()
-        print(f'MFU (projections only): {100 * (2 * 6 * model_params * tokens / (num_devices * profile_duration)) / device_flops:.2f}% MFU')
+            # We profile on the second step, because the first step has a long pause for XLA
+            # compilation and initial shuffle buffer loading.
+            if training_io.is_device_0() and step == start_step + 1:
+                jax.block_until_ready(state)
+                training_io.start_profile()
+                profile_start = time.time()
 
-      if step % log_interval == 0: 
-        if cum_metrics:
-            cum_metrics = Metrics(
-              loss=cum_metrics.loss / log_interval, 
-            learning_rate=cum_metrics.learning_rate / log_interval, 
-            grad_norm=cum_metrics.grad_norm / log_interval,
-            raw_grad_norm=cum_metrics.raw_grad_norm / log_interval
-          )
-        else:
-          cum_metrics = output
-        training_io.log(step, logger, cum_metrics)
-        cum_metrics = output 
-      else:
-        update_metrics(output) 
+            state, output, layer_metrics = c_training_step(
+                state, jnp.uint32(step), loader.load(step)
+            )
+
+            # Run profile for two steps, to include data loading time in between them.
+            if training_io.is_device_0() and step == start_step + 2:
+                jax.block_until_ready(state)
+                profile_duration = time.time() - profile_start
+                training_io.stop_profile(model_dir)
+
+                # Print MFU, including (one step of) data loading time.
+                print(f"Profile time: {profile_duration}s for 2 steps.")
+                model_params = jax.tree.reduce(
+                    operator.add, jax.tree.map(lambda w: w.size, state.weights)
+                )
+                tokens = config.training.tokens.batch * config.training.tokens.len
+                print(f"Model params: {model_params:_}")
+                print(f"Tokens: {tokens:_}")
+                device_flops = training_io.get_flops_per_device()
+                num_devices = jax.device_count()
+                print(
+                    f"MFU (projections only): {100 * (2 * 6 * model_params * tokens / (num_devices * profile_duration)) / device_flops:.2f}% MFU"
+                )
+
+            if step % log_interval == 0:
+                if cum_metrics:
+                    cum_metrics = Metrics(
+                        loss=cum_metrics.loss / log_interval,
+                        learning_rate=cum_metrics.learning_rate / log_interval,
+                        grad_norm=cum_metrics.grad_norm / log_interval,
+                        raw_grad_norm=cum_metrics.raw_grad_norm / log_interval,
+                    )
+                else:
+                    cum_metrics = output
+                training_io.log(step, logger, cum_metrics)
+                training_io.log(step, logger, layer_metrics)
+                cum_metrics = output 
+            else:
+                update_metrics(output) 
 
 def clear_tpu_locks():
   try:
@@ -556,12 +568,12 @@ def clear_tpu_locks():
   except Exception as e:
     print(f'Error clearing TPU locks: {e}')
     pass
-  
+
 def get_model_name(config_name: str):
   overrides = hydra.core.hydra_config.HydraConfig.get()['job']['override_dirname']
   overrides = ','.join(overrides.split(',')[2:]).replace("=", ':')
   return f"{config_name}_{overrides}" if overrides else config_name
-  
+
 @hydra.main(config_path='configs', version_base=None)
 def main(config):
   config = jax_extra.make_dataclass_from_dict(Config, config)
@@ -583,7 +595,6 @@ def main(config):
 
   if not training_io.is_device_0():
       task.set_system_tags((task.get_system_tags() or []) + ['hidden'])
-
 
 
 if __name__ == "__main__":

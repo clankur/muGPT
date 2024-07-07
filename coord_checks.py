@@ -40,21 +40,16 @@ def train_model(config, steps):
         assert (
             config.model.vocab > loader.max_token_id
         ), f"{config.model.vocab} vs {loader.max_token_id}"
-        # model_dir = os.path.join(config.paths.root_working_dir, model_name)
 
-        # training_io.mkdir(model_dir)
         state = jax.jit(partial(State.init, config.model))(
             fold_in_str(root_rng, "init")
         )
-        # state, start_step = training_io.load_checkpoint_if_it_exists(model_dir, state, config.io)
 
         # Explicitly compile training step, to record XLA HLO graph.
         # See https://bnikolic.co.uk/blog/python/jax/2022/02/22/jax-outputgraph-rev
         c_training_step = training_step.lower(
             state, jnp.uint32(0), config.model, config.training, loader.load(0)
         ).compile()
-        date = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-        # training_io.save_hlo_svg(os.path.join(model_dir, f'training_step_optimized_hlo_{date}.svg'), c_training_step)
 
         for step in range(steps):
             state, output = c_training_step(state, jnp.uint32(step), loader.load(step))

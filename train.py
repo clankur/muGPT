@@ -327,7 +327,6 @@ def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHpa
   def sharded_step(state: State, step: u32[b''], batch: TokenBatch) -> Tuple[State, Metrics, LayerMetrics]:
     print(f'{step=}')
     ( loss, layer_metrics), grad = jax.value_and_grad(lambda weights: weights.loss(h, batch), has_aux=True)(state.weights) # TODO: have to add have_aux = True, unpack loss and metrics
-    # jax.debug.print('layer metrics: {layer_metrics}', layer_metrics=layer_metrics)
 
     # Gradients have already been reduced across chips because the gradient of the weight `all_gather`
     # is weight-gradient `psum_scatter`. Loss, on the other hand, hasn't been reduced across chips: if we

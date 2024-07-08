@@ -46,11 +46,20 @@ def log(step: int, logger: Logger, output: PyTree):
     for path, arr in jax.tree_util.tree_leaves_with_path(output):
       path = jax.tree_util.keystr(path)
       arr = jax.device_get(arr)
+
       if arr.shape == () and arr.dtype == jnp.float32:
         if logger:
           logger.report_scalar(
             title=path, series=path, value=arr, iteration=step)
         metrics_dict[path] = float(arr)
+      elif jnp.size(arr) > 1 and arr.dtype == jnp.float32:
+        for i, v in enumerate(arr):
+          p = f"{path}_{i}"
+          if logger:
+            logger.report_scalar(
+              title=path, series=f"layer_{i}", value=v, iteration=step)
+          metrics_dict[p] = float(v)
+            
       elif arr.dtype == jnp.float32:
         if logger:
           logger.report_histogram(

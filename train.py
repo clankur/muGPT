@@ -71,7 +71,6 @@ class LayerMetrics:
   attn_out: f32[b'layers']
   up_proj: f32[b'layers']
   ffn_out: f32[b'layers']
-  
 
 @pytree_dataclass
 class Model:

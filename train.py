@@ -68,6 +68,10 @@ class LayerMetrics:
   query: f32[b'layers']
   key: f32[b'layers']
   value: f32[b'layers']
+  attn_out: f32[b'layers']
+  up_proj: f32[b'layers']
+  ffn_out: f32[b'layers']
+  
 
 @pytree_dataclass
 class Model:
@@ -178,11 +182,7 @@ class Model:
 
       k = rope_table.apply('L d -> 1 L 1 d', k)
 
-      layer_metrics = LayerMetrics(
-        query = jnp.sum(jnp.abs(q.astype(jnp.float32))),
-        key = jnp.sum(jnp.abs(k.astype(jnp.float32))),
-        value = jnp.sum(jnp.abs(v.astype(jnp.float32)))
-      )
+      
 
       logits = shardops.einsum_unreduced(
         'B/d Qlen Q K/t D, B/d Klen K/t D -> B/d Qlen Klen Q K/t', q, k, preferred_element_type=jnp.float32)
@@ -209,6 +209,15 @@ class Model:
       w_down = shardops.all_gather('M/d F/t -> M F/t', jnp.bfloat16(w_down))
       ffn_out = shardops.einsum_unreduced('B/d L F/t, M F/t -> B/d L M', y, w_down)
       ffn_out = shardops.psum_scatter('B/d L M -> B/d L M/t', ffn_out)
+
+      layer_metrics = LayerMetrics(
+        query = jnp.sum(jnp.abs(q.astype(jnp.float32))),
+        key = jnp.sum(jnp.abs(k.astype(jnp.float32))),
+        value = jnp.sum(jnp.abs(v.astype(jnp.float32))),
+        attn_out = jnp.sum(jnp.abs(attn_out.astype(jnp.float32))),
+        up_proj = jnp.sum(jnp.abs(up_proj.astype(jnp.float32))),
+        ffn_out = jnp.sum(jnp.abs(ffn_out.astype(jnp.float32)))
+      )
 
       return jnp.bfloat16(x + ffn_out), layer_metrics 
 

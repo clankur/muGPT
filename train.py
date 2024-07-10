@@ -315,6 +315,7 @@ class TrainingHparams:
   tokens: TokenBatchParams
   seed: int
   queue: Optional[str] = None
+  use_grad_clip: bool = True
 
 @pytree_dataclass
 class State:
@@ -363,10 +364,13 @@ def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHpa
       global_norm_square += jnp.sum(jax.lax.square(g))
     global_norm_square = jax.lax.psum(global_norm_square, ('d', 't'))
     global_norm = jnp.sqrt(global_norm_square)
-    # rescale = jnp.minimum(1.0, 1.0 / global_norm)
-    rescale = 1.0
 
     base = h.base
+    
+    if hparams.use_grad_clip:
+      rescale = jnp.minimum(1.0, 1.0 / global_norm)
+    else:
+      rescale = 1.0
      
     lr_scales = Model(
       embed=1.0,
@@ -508,7 +512,7 @@ def main_contained(config, logger):
             cum_metrics.grad_norm += metrics.grad_norm
             cum_metrics.raw_grad_norm += metrics.raw_grad_norm
             cum_metrics.learning_rate += metrics.learning_rate
-
+            
         for step in range(start_step, config.training.steps):
             # if step % config.checkpoint_interval == 0 and step > start_step:
             #   training_io.save_checkpoint(model_dir, step, state, config.io)

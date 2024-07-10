@@ -208,14 +208,16 @@ class Model:
       w_down = shardops.all_gather('M/d F/t -> M F/t', jnp.bfloat16(w_down))
       ffn_out = shardops.einsum_unreduced('B/d L F/t, M F/t -> B/d L M', y, w_down)
       ffn_out = shardops.psum_scatter('B/d L M -> B/d L M/t', ffn_out)
+        
+      l1_norm = lambda x: jnp.sum(jnp.abs(x.astype(jnp.float32)))
 
       layer_metrics = LayerMetrics(
-        query = jnp.sum(jnp.abs(q.astype(jnp.float32))),
-        key = jnp.sum(jnp.abs(k.astype(jnp.float32))),
-        value = jnp.sum(jnp.abs(v.astype(jnp.float32))),
-        attn_out = jnp.sum(jnp.abs(attn_out.astype(jnp.float32))),
-        up_proj = jnp.sum(jnp.abs(up_proj.astype(jnp.float32))),
-        ffn_out = jnp.sum(jnp.abs(ffn_out.astype(jnp.float32)))
+        query=l1_norm(q),
+        key=l1_norm(k),
+        value=l1_norm(v),
+        attn_out=l1_norm(attn_out),
+        up_proj=l1_norm(up_proj),
+        ffn_out=l1_norm(ffn_out)
       )
 
       return jnp.bfloat16(x + ffn_out), layer_metrics 
@@ -582,7 +584,8 @@ def clear_tpu_locks():
 
 def get_model_name(config_name: str):
   overrides = hydra.core.hydra_config.HydraConfig.get()['job']['override_dirname']
-  overrides = ','.join(overrides.split(',')[2:]).replace("=", ':')
+  print(overrides)
+  overrides = ','.join(overrides.split(',')[1:]).replace("=", ':')
   return f"{config_name}_{overrides}" if overrides else config_name
 
 @hydra.main(config_path='configs', version_base=None)

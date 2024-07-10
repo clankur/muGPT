@@ -277,6 +277,7 @@ class TrainingHparams:
   tokens: TokenBatchParams
   seed: int
   queue: Optional[str] = None
+  use_grad_clip: bool = True
 
 @pytree_dataclass
 class State:
@@ -322,7 +323,10 @@ def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHpa
       global_norm_square += jnp.sum(jax.lax.square(g))
     global_norm_square = jax.lax.psum(global_norm_square, ('d', 't'))
     global_norm = jnp.sqrt(global_norm_square)
-    rescale = 1.0
+    if hparams.use_grad_clip:
+      rescale = jnp.minimum(1.0, 1.0 / global_norm)
+    else:
+      rescale = 1.0
      
     new_ps = []
     new_mus = []

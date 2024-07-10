@@ -297,6 +297,7 @@ class TrainingHparams:
   tokens: TokenBatchParams
   seed: int
   queue: Optional[str] = None
+  use_grad_clip: bool = True
 
 @pytree_dataclass
 class State:
@@ -361,6 +362,11 @@ def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHpa
       final_layer_norm=1.0
     )
 
+    if hparams.use_grad_clip:
+      rescale = jnp.minimum(1.0, 1.0 / global_norm)
+    else:
+      rescale = 1.0
+     
     new_ps = []
     new_mus = []
     new_nus = []
@@ -460,8 +466,19 @@ def main_contained(config, logger):
     date = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
     # training_io.save_hlo_svg(os.path.join(model_dir, f'training_step_optimized_hlo_{date}.svg'), c_training_step)
 
+      
     log_interval = math.ceil(config.training.steps / 5000) 
     print(f'{log_interval=}') 
+
+    cum_metrics = None 
+
+    def update_metrics(metrics: Metrics):
+      nonlocal cum_metrics
+      cum_metrics.loss += metrics.loss
+      cum_metrics.grad_norm += metrics.grad_norm
+      cum_metrics.raw_grad_norm += metrics.raw_grad_norm
+      cum_metrics.learning_rate += metrics.learning_rate
+      
     for step in range(start_step, config.training.steps):
       # if step % config.checkpoint_interval == 0 and step > start_step:
       #   training_io.save_checkpoint(model_dir, step, state, config.io)
@@ -491,8 +508,20 @@ def main_contained(config, logger):
         num_devices = jax.device_count()
         print(f'MFU (projections only): {100 * (2 * 6 * model_params * tokens / (num_devices * profile_duration)) / device_flops:.2f}% MFU')
 
-      if log_interval == 0 or step % log_interval == 0: 
-        training_io.log(step, logger, output)
+      if step % log_interval == 0: 
+        if cum_metrics:
+            cum_metrics = Metrics(
+              loss=cum_metrics.loss / log_interval, 
+            learning_rate=cum_metrics.learning_rate / log_interval, 
+            grad_norm=cum_metrics.grad_norm / log_interval,
+            raw_grad_norm=cum_metrics.raw_grad_norm / log_interval
+          )
+        else:
+          cum_metrics = output
+        training_io.log(step, logger, cum_metrics)
+        cum_metrics = output 
+      else:
+        update_metrics(output) 
 
 def clear_tpu_locks():
   try:

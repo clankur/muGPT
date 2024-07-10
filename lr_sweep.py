@@ -61,7 +61,7 @@ def lr_sweep(
         for i in range(3):
             try:
                 Task.enqueue(child_task.id, queue_name=queue_name)
-                child_task.wait_for_status()
+                child_task.wait_for_status(check_interval_sec=600)
                 break
             except RuntimeError as e:
                 if i + 1 == 3:

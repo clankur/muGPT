@@ -16,6 +16,7 @@ training:
   learning_rate: 7.3e-3
   tokens:
     batch: 256
+  use_grad_clipping: False
 
 model:
   d_model: 1024

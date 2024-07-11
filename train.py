@@ -502,7 +502,7 @@ def clear_tpu_locks():
   
 def get_model_name(config_name: str):
   overrides = hydra.core.hydra_config.HydraConfig.get()['job']['override_dirname']
-  overrides = ','.join(overrides.split(',')[2:]).replace("=", ':')
+  overrides = ','.join(overrides.split(',')[1:]).replace("=", ':')
   return f"{config_name}_{overrides}" if overrides else config_name
   
 @hydra.main(config_path='configs', version_base=None)

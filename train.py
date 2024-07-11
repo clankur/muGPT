@@ -361,9 +361,13 @@ def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHpa
     )
 
     if hparams.use_grad_clip:
-      rescale = jnp.minimum(1.0, 1.0 / global_norm)
+      clip_value = (base.d_model / h.d_model) 
+      # according to claude this might have to be a fixed value across all widths
+      # TODO: check what is correct
+      rescale = jnp.minimum(1.0, clip_value / global_norm)
     else:
       rescale = 1.0
+    
      
     new_ps = []
     new_mus = []

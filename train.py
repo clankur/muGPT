@@ -276,6 +276,7 @@ class TrainingHparams:
   tokens: TokenBatchParams
   seed: int
   queue: Optional[str] = None
+  use_grad_clip: bool = True
 
 @pytree_dataclass
 class State:
@@ -321,7 +322,10 @@ def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHpa
       global_norm_square += jnp.sum(jax.lax.square(g))
     global_norm_square = jax.lax.psum(global_norm_square, ('d', 't'))
     global_norm = jnp.sqrt(global_norm_square)
-    rescale = 1.0
+    if hparams.use_grad_clip:
+      rescale = jnp.minimum(1.0, 1.0 / global_norm)
+    else:
+      rescale = 1.0
      
     new_ps = []
     new_mus = []
@@ -447,7 +451,6 @@ def main_contained(config, logger):
         profile_start = time.time()
 
       state, output = c_training_step(state, jnp.uint32(step), loader.load(step))
-      output
 
       # Run profile for two steps, to include data loading time in between them.
       if training_io.is_device_0() and step == start_step + 2:
@@ -498,7 +501,7 @@ def clear_tpu_locks():
   
 def get_model_name(config_name: str):
   overrides = hydra.core.hydra_config.HydraConfig.get()['job']['override_dirname']
-  overrides = ','.join(overrides.split(',')[2:]).replace("=", ':')
+  overrides = ','.join(overrides.split(',')[1:]).replace("=", ':')
   return f"{config_name}_{overrides}" if overrides else config_name
   
 @hydra.main(config_path='configs', version_base=None)

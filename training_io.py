@@ -37,6 +37,22 @@ class IOConfig:
   # CPU cores.
   max_io_threads: int
 
+def log_coord_check (width: float, logger: Logger, step: int,  output: PyTree) -> None:
+  if is_device_0():
+    metrics_dict = {}
+    for path, arr in jax.tree_util.tree_leaves_with_path(output):
+      path = jax.tree_util.keystr(path)
+      arr = jax.device_get(arr)
+      for i, v in enumerate(arr):
+          p = f"{path}_{i}"
+          if logger:
+            logger.report_scalar(
+              title=f"t={step}_{path}", series=f"layer_{i}", value=jnp.log2(v), iteration=int(width))
+          metrics_dict[p] = float(v)
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{now}] Step {step}: {metrics_dict}") 
+
+
 def log(step: int, logger: Logger, output: PyTree):
   """Logs the output of a training step. The output must be a PyTree of f32 arrays."""
 

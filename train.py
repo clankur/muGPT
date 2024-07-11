@@ -209,7 +209,7 @@ class Model:
       ffn_out = shardops.einsum_unreduced('B/d L F/t, M F/t -> B/d L M', y, w_down)
       ffn_out = shardops.psum_scatter('B/d L M -> B/d L M/t', ffn_out)
         
-      l1_norm = lambda x: jnp.sum(jnp.abs(x.astype(jnp.float32)))
+      l1_norm = lambda x: jnp.mean(jnp.abs(x.astype(jnp.float32)))
 
       layer_metrics = LayerMetrics(
         query=l1_norm(q),
@@ -461,7 +461,7 @@ class Config:
   def training_data(self) -> Union[FlatTokensParams, HuggingFaceDataParams]:
     return self.flat_tokens or self.hf_dataset
 
-def main_contained(config, logger):
+def main_contained(config: Config, logger):
     """Main program, which does not access external services except as specified by config.paths or logger."""
     # Use partitionable (and hopefully fusable!) RNG.
     #
@@ -561,7 +561,7 @@ def main_contained(config, logger):
                 else:
                     cum_metrics = output
                 training_io.log(step, logger, cum_metrics)
-                training_io.log(step, logger, layer_metrics)
+                training_io.log_coord_check(config.model.d_model, logger, step, layer_metrics)
                 cum_metrics = output 
             else:
                 update_metrics(output) 

@@ -130,7 +130,7 @@ class Model:
     w_up = w_up_scale * jax.random.truncated_normal(fold_in_str(rng, 'w_up'), -2, 2, ff_shape, dtype=jnp.float32)
     w_down = w_down_scale * jax.random.truncated_normal(fold_in_str(rng, 'w_down'), -2, 2, ff_shape, dtype=jnp.float32)
 
-    unembed = jax.zeros((h.vocab, h.d_model), dtype=jnp.float32)
+    unembed = jnp.zeros((h.vocab, h.d_model), dtype=jnp.float32)
 
     arrays = Model(
       embed=embed,

@@ -564,6 +564,7 @@ def main(config):
     task_name = config.paths.model_name if config.paths.model_name else get_model_name(config_name)
     git_branch_name = subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout.strip()
     task = Task.init(project_name=f'{config_name}/{git_branch_name}', task_name=task_name)
+    task.add_tags([git_branch_name])
     logger = task.get_logger()
     task.execute_remotely(queue_name=config.training.queue)
     task.launch_multi_node(config.num_hosts, wait=True, queue=config.training.queue + '-workers')

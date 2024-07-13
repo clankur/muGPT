@@ -40,7 +40,7 @@ def lr_sweep(
     model_name,
     queue_name,
     template_task_id,
-    start_lr=1e-5,
+    start_lr=1e-4,
     max_lr=5e-2,
     search_mult=3,
 ):
@@ -90,7 +90,7 @@ def lr_sweep(
         i += 1
         current_lr *= search_mult
         current_loss = get_loss(current_lr)
-        print(f"Iteration {i+1}: LR = {current_lr:.6f}, Loss = {current_loss:.6f}")
+        print(f"Iteration {i}: LR = {current_lr:.6f}, Loss = {current_loss:.6f}")
         logger.report_scalar("loss", "value", current_loss, iteration=i)
         if current_loss < best_loss:
             best_lr, best_loss = current_lr, current_loss
@@ -99,10 +99,11 @@ def lr_sweep(
 
     print("proceeding with binary search now")
 
-    lower_bound, upper_bound = np.log10([best_lr, current_lr])
-    while (10**upper_bound / (10**lower_bound)) > 1.1:
-        print(np.abs(10**upper_bound - 10**lower_bound))
-        midpoint = (lower_bound + upper_bound) / 2
+    lower_bound, upper_bound = best_lr  / search_mult, current_lr
+    while (upper_bound / (lower_bound)) > 1.1:
+        print(np.abs(upper_bound - lower_bound))
+        log_lb, log_ub = np.log10([lower_bound, upper_bound])
+        midpoint = (log_lb + log_ub) / 2
         loss = get_loss(10**midpoint)
         i += 1
         if loss < best_loss:
@@ -114,7 +115,7 @@ def lr_sweep(
         logger.report_scalar("loss", "value", loss, iteration=i)
 
         print(f"Bounds = [{10**lower_bound:.6f}, {10**upper_bound:.6f}]")
-        print(f"Iteration {i+1}: LR = {midpoint:.6f}, Loss = {loss:.6f}")
+        print(f"Iteration {i}: LR = {midpoint:.6f}, Loss = {loss:.6f}")
 
     print(f"\nBest learning rate found: {best_lr:.6f} with loss: {best_loss:.6f}")
 

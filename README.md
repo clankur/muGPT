@@ -28,4 +28,6 @@ The `paths.model_name` flag specifies which subdirectory on disk (inside `/tmp`)
 
 ## Acknowledgements
 
+Thanks to the [MatX team](https://matx.com/) for their implementation of GPT in seqax which I used to implement muP and SharedKV attention.
+
 Thanks to the [Google TPU Research Cloud](https://sites.research.google/trc/about/), which has supported my investigations.

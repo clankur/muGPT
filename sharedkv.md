@@ -6,7 +6,7 @@ Past papers have found success in applying grouped query attention (GQA) to lowe
 
 ## Findings
 
-So far early results show the approach is promising and doesn't result in a significant model degradation. Comparing a 1b run with SharedKV to the 1b multi-head attention (MHA) baseline run it appears SharedKV lags slightly and note this is without performing an learning rate sweep for the model using SharedKV. It's unclear if it would require a different learning rate, but seeing that they have different layout for attention it is something to rule out as a confounding variable. To see the full experiment comparison, you can view it [here on ClearML.](https://embed.clear.ml/projects/*/compare-experiments;ids=1151de73c92c49baaa612fd2a1567ed8,80acd1b6b7fc4fb7ad3800b4ecaa3be2/scalars/graph?metricVariants=loss&metricName=&params=loss%3E)  
+So far early results show the approach is promising and doesn't result in a significant model degradation. Comparing a 1b run with SharedKV to the 1b multi-head attention (MHA) baseline run it appears SharedKV lags 7k steps behind MHA, but note this is without performing an learning rate sweep for the model using SharedKV. It's unclear if it would require a different learning rate, but seeing that they have different layout for attention it is something to rule out as a confounding variable. To see the full experiment comparison, you can view it [here on ClearML.](https://embed.clear.ml/projects/*/compare-experiments;ids=1151de73c92c49baaa612fd2a1567ed8,80acd1b6b7fc4fb7ad3800b4ecaa3be2/scalars/graph?metricVariants=loss&metricName=&params=loss%3E)  
 
 ## Future experiments
 

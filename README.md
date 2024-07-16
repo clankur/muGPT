@@ -1,7 +1,7 @@
 # mugpt
 
 ugpt is a fork of [seqax by MatX](https://github.com/MatX-inc/seqax) modified to run on Google's TPU v4-32s and use muP transfer described in the paper [Tensor Programs V: Tuning Large Neural Networks via Zero-Shot Hyperparameter Transfer
-](https://arxiv.org/pdf/2203.03466). Currently the muP implementation resides in the [mup branch](https://github.com/clankur/mugpt/tree/mup) and I'm also experimenting with a modified form of attention "SharedKV" which resides in the [sharedkv branch](https://github.com/clankur/mugpt/tree/shared_kv). For more information on these experiments, take a look here:
+](https://arxiv.org/pdf/2203.03466). Currently the muP implementation resides in the [mup branch](https://github.com/clankur/mugpt/tree/mup) and I'm also experimenting with a modified form of attention "SharedKV" which resides in the [sharedkv branch](https://github.com/clankur/mugpt/tree/shared_kv). For more information on these investigations, take a look here:
 
 - [Exploring the best approaches for implementing muP](./mup.md)
 - [Minimizing HBM usage through SharedKV](./sharedkv.md)

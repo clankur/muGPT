@@ -11,7 +11,7 @@ from train import Config
 import subprocess
 
 args = {
-    "template_task_id": '69f514621af04bb69ec5e8e84b948635',
+    "template_task_id": "69f514621af04bb69ec5e8e84b948635",
     "run_as_service": False,
 }
 
@@ -44,7 +44,9 @@ def create_hpo_task(config: Config):
         hyper_parameters=[
             LogUniformParameterRange(
                 "Hydra/training.learning_rate", min_value=-5, max_value=0
-            )
+            ),
+            LogUniformParameterRange("Hydra/model.a_attn", min_value=0, max_value=1),
+            LogUniformParameterRange("Hydra/model.a_output", min_value=0, max_value=1),
         ],
         # setting the objective metric we want to maximize/minimize
         objective_metric_title="loss",
@@ -104,7 +106,7 @@ def main(config):
 
         optimizer = create_hpo_task(config)
         # report every 12 seconds, this is way too often, but we are testing here J
-        optimizer.set_report_period(30)
+        optimizer.set_report_period(3600)
         # start the optimization process, callback function to be called every time an experiment is completed
         # this function returns immediately
         optimizer.start(job_complete_callback=job_complete_callback)
@@ -127,8 +129,3 @@ def main(config):
 
 if __name__ == "__main__":
     main()
-
-
-# Step 2: Define the initial search space in log scale
-
-# Function to create a new HPO task with a specified learning rate range

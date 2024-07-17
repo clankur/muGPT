@@ -19,8 +19,8 @@ training:
 
 model:
   d_model: 1024
-  n_q_per_kv: 1
-  n_kv: 16
+  n_q_per_kv: 2 
+  n_kv: 8 
   d_head: 128
   layers: 8
   d_ff: 8192

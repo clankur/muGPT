@@ -39,7 +39,8 @@ Below, both of these models share the same dimensionality - only differing in nu
 
 ### Transferability of a muP models
 
-A 10m model did not scale well past 37m, but 37m to 270m transferred well and outperformed SP with a LR found through an LR sweep and appears to be a 2k steps ahead of the SP baseline. Seemingly these results also hold with a 1B model, however, the learning rate of the SP version of the 1B was specifically tuned for a model using gradient clipping so that adds a confounding variable that I have to verify isn't skewing the results. You can view the results of my experiments of the 270m experiments [here](https://embed.clear.ml/projects/*/compare-experiments;ids=1151de73c92c49baaa612fd2a1567ed8,80acd1b6b7fc4fb7ad3800b4ecaa3be2/scalars/graph?metricVariants=loss&metricName=&params=loss) and the 1b experiments [here](https://embed.clear.ml/projects/*/compare-experiments;ids=8ba8cdbca4094bab8a458e9416fc97be,8da892f490744918b675c4b071860d48/scalars/graph?metricVariants=loss&metricName=&params=loss).
+A 10m model did not scale well past 37m, but 37m to 270m transferred well and outperformed SP with a LR found through an LR sweep and is 2k steps ahead of the SP baseline.
+These results also hold with a 1B model, where muP was 4500 steps ahead. You can view the results of my experiments of the 270m experiments [here](https://embed.clear.ml/projects/*/compare-experiments;ids=1151de73c92c49baaa612fd2a1567ed8,80acd1b6b7fc4fb7ad3800b4ecaa3be2/scalars/graph?metricVariants=loss&metricName=&params=loss) and the 1b experiments [here](https://embed.clear.ml/projects/*/compare-experiments;ids=8da892f490744918b675c4b071860d48,eebfcd7638784437ac5faf0836a3cb5b/scalars/graph?metricVariants=loss&metricName=&params=loss).
 
 ### Zero initialization for the queries and output layer
 

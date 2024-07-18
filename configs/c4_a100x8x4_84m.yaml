@@ -13,8 +13,8 @@ training:
   warmup_steps: 650 
   steps:        6500
   steps_for_lr: 6500
-  learning_rate: 3.0e-3
-  tokens:
+  learning_rate: 1.0e-3
+  token1:
     batch: 256
 
 model:

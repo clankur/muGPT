@@ -1,11 +1,11 @@
+import time
 from clearml import Task
 import numpy as np
 import hydra
 import jax_extra
-from train import Config
 import subprocess
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Callable, Iterable
 from datetime import datetime
 
 
@@ -14,8 +14,7 @@ class Config:
     model_name: str
     queue_name: str
     project_name: Optional[str] = None
-
-
+     
 def get_task_details(config: Config):
     git_branch_name = subprocess.run(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
@@ -30,18 +29,38 @@ def get_task_details(config: Config):
         if config.project_name
         else f"{config_name}/{git_branch_name}"
     )
+    
     task_name = config.model_name
 
     return project_name, task_name
 
+def wait_for_status_with_callback(
+        task,
+        status=(Task.TaskStatusEnum.completed, Task.TaskStatusEnum.stopped, Task.TaskStatusEnum.closed),
+        raise_on_status=(Task.TaskStatusEnum.failed,),
+        check_interval_sec=60.,
+        callback: Optional[Callable[[], bool]] = None
+):
+    # type: (Task, Iterable[Task.TaskStatusEnum], Optional[Iterable[Task.TaskStatusEnum]], float, Optional[Callable[[], bool]]) -> None
+    stopped_status = list(status) + (list(raise_on_status) if raise_on_status else [])
+    while task.status not in stopped_status:
+        if callback and callback():
+            break
+        time.sleep(check_interval_sec)
+        task.reload()
+    if raise_on_status and task.status in raise_on_status:
+        raise RuntimeError(f"Task {task.task_id} has status: {task.status}.")
+    # make sure we have the latest Task object
+    task.reload()
 
 def lr_sweep(
     config_name,
     model_name,
     queue_name,
     template_task_id,
-    start_lr=1e-5,
+    start_lr=0.005400,
     max_lr=5e-2,
+    iterations=5,
     search_mult=3,
 ):
     project_name = f"{config_name}/lr_sweep"
@@ -54,14 +73,29 @@ def lr_sweep(
         # Clone the template task and override the learning rate
         child_task = Task.clone(
             source_task=template_task_id,
-            name=f"{task_name}_lr:{learning_rate:.6f}",
+            name=f"{model_name}_lr:{learning_rate:.6f}",
         )
+        prev_loss = None
+        def check_loss():
+            nonlocal prev_loss
+            scalars = child_task.get_last_scalar_metrics()
+            loss = scalars["loss"]["loss"]["y"]
+            if prev_loss and prev_loss > loss:
+                return True
+            print(prev_loss, loss, best_loss)
+            prev_loss = loss
+            return False
+        
         child_task.set_parameter("Hydra/training.learning_rate", learning_rate)
         print(f"training model with lr: {learning_rate}")
         for i in range(3):
             try:
                 Task.enqueue(child_task.id, queue_name=queue_name)
-                child_task.wait_for_status(check_interval_sec=600)
+                wait_for_status_with_callback(
+                    task=child_task,
+                    callback=check_loss,
+                    check_interval_sec=120
+                )
                 break
             except RuntimeError as e:
                 if i + 1 == 3:
@@ -69,7 +103,7 @@ def lr_sweep(
                 print(e)
                 child_task = Task.clone(
                     source_task=child_task.id,
-                    name=f"{task_name}_lr:{learning_rate:.6f}",
+                    name=f"{model_name}_lr:{learning_rate:.6f}",
                 )
 
         # Get the loss from the child task
@@ -99,26 +133,31 @@ def lr_sweep(
 
     print("proceeding with binary search now")
 
-    lower_bound, upper_bound = np.log10([best_lr, current_lr])
-    while (10**upper_bound / (10**lower_bound)) > 1.1:
-        print(np.abs(10**upper_bound - 10**lower_bound))
-        midpoint = (lower_bound + upper_bound) / 2
-        loss = get_loss(10**midpoint)
-        i += 1
-        if loss < best_loss:
-            best_loss, best_lr = loss, 10**midpoint
-            lower_bound = midpoint
+    lr_low, lr_high = best_lr / search_mult, best_lr * search_mult
+    for j in range(iterations):
+        log_lr_low, log_lr_high = np.log10([ lr_low, lr_high ])
+        
+        log_lr_mid = (log_lr_low + log_lr_high) / 2
+        lr_mid = 10 ** log_lr_mid
+        loss = get_loss(lr_mid)
+        
+        if get_loss(lr_low) < loss:
+            lr_high = lr_mid
+        elif get_loss(lr_high) < loss:
+            lr_low = lr_mid
         else:
-            upper_bound = midpoint
+            # If midpoint is best, narrow the search range
+            lr_low = 10 ** ((log_lr_low + log_lr_mid) / 2)
+            lr_high = 10 ** ((log_lr_high + log_lr_mid) / 2)
+        logger.report_scalar("loss", "value", loss, iteration=i+j)
 
-        logger.report_scalar("loss", "value", loss, iteration=i)
-
-        print(f"Bounds = [{10**lower_bound:.6f}, {10**upper_bound:.6f}]")
-        print(f"Iteration {i+1}: LR = {midpoint:.6f}, Loss = {loss:.6f}")
-
+        print(f"Bounds = [{lr_low:.6f}, {lr_high:.6f}]")
+        print(f"Iteration {i+j}: LR = {lr_mid:.6f}, Loss = {loss:.6f}")
+        
     print(f"\nBest learning rate found: {best_lr:.6f} with loss: {best_loss:.6f}")
 
     parent_task.close()
+    return best_lr
 
 
 @hydra.main(config_path="configs", version_base=None)
@@ -126,8 +165,10 @@ def main(config):
     config = jax_extra.make_dataclass_from_dict(Config, config)
     config_name = hydra.core.hydra_config.HydraConfig.get()["job"]["config_name"]
     project_name, task_name = get_task_details(config)
+    
     print(f"{project_name=}")
     print(f"{task_name=}")
+
     template_task_id = Task.get_task(
         project_name=project_name,
         task_name=task_name,

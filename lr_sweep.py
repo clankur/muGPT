@@ -144,10 +144,7 @@ def lr_sweep(
             loss_per_learning_rate[lr] = train(lr, template_task_id)
         return loss_per_learning_rate[lr]
 
-    loss_per_learning_rate[1e-3] = 3.551180362701416
-    lr_low, lr_high = 0.000580, 0.001730  # exponential_search()
-    loss_per_learning_rate[lr_low] = 3.4562809467315674
-    loss_per_learning_rate[lr_high] = 3.869420051574707
+    lr_low, lr_high = exponential_search()
     print("proceeding with binary search now")
     best_lr = binary_search(lr_low, lr_high)
 

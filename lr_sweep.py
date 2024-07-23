@@ -41,11 +41,7 @@ def lr_sweep(
     model_name,
     queue_name,
     template_task_id,
-<<<<<<< HEAD
-    start_lr=1e-4,
-=======
     start_lr=5e-4,
->>>>>>> 77c8c1630deab8ace824cbc160894513132ac0da
     max_lr=5e-2,
     iterations=5,
     search_mult=3,

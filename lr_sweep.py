@@ -99,7 +99,7 @@ def lr_sweep(
 
     print("proceeding with binary search now")
 
-    lower_bound, upper_bound = best_lr  / search_mult, current_lr
+    lower_bound, upper_bound = best_lr / search_mult, current_lr
     while (upper_bound / (lower_bound)) > 1.1:
         print(np.abs(upper_bound - lower_bound))
         log_lb, log_ub = np.log10([lower_bound, upper_bound])

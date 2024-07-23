@@ -1,11 +1,11 @@
+import time
 from clearml import Task
 import numpy as np
 import hydra
 import jax_extra
-from train import Config
 import subprocess
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Callable, Iterable
 from datetime import datetime
 
 
@@ -30,6 +30,7 @@ def get_task_details(config: Config):
         if config.project_name
         else f"{config_name}/{git_branch_name}"
     )
+
     task_name = config.model_name
 
     return project_name, task_name
@@ -40,8 +41,13 @@ def lr_sweep(
     model_name,
     queue_name,
     template_task_id,
+<<<<<<< HEAD
     start_lr=1e-4,
+=======
+    start_lr=5e-4,
+>>>>>>> 77c8c1630deab8ace824cbc160894513132ac0da
     max_lr=5e-2,
+    iterations=5,
     search_mult=3,
 ):
     project_name = f"{config_name}/lr_sweep"
@@ -49,77 +55,107 @@ def lr_sweep(
     parent_task = Task.init(project_name=project_name, task_name=task_name)
     logger = parent_task.get_logger()
     loss_per_learning_rate = {}
+    i = 0
+
+    best_lr, best_loss = None, float("inf")
+
+    def exponential_search():
+        nonlocal i, best_lr, best_loss
+        current_lr = start_lr
+
+        while current_lr <= max_lr:
+            current_loss = get_loss(current_lr)
+            print(f"Iteration {i}: LR = {current_lr:.6f}, Loss = {current_loss:.6f}")
+            logger.report_scalar("loss", "value", current_loss, iteration=i)
+            if current_loss < best_loss:
+                best_lr, best_loss = current_lr, current_loss
+            else:
+                break
+            i += 1
+            current_lr *= search_mult
+
+        return best_lr / search_mult, best_lr * search_mult
+
+    def binary_search(lr_low, lr_high):
+        nonlocal best_loss, best_lr
+
+        for j in range(iterations):
+            log_lr_low, log_lr_high = np.log10([lr_low, lr_high])
+
+            log_lr_mid = (log_lr_low + log_lr_high) / 2
+            lr_mid = 10**log_lr_mid
+            loss, low_loss, high_loss = (
+                get_loss(lr_mid),
+                get_loss(lr_low),
+                get_loss(lr_high),
+            )
+
+            for lr, loss in [(lr_low, low_loss), (lr_mid, loss), (lr_high, high_loss)]:
+                if loss < best_loss:
+                    best_loss, best_lr = loss, lr
+
+            if low_loss < loss:
+                lr_high = lr_mid
+            elif high_loss < loss:
+                lr_low = lr_mid
+            else:
+                # If midpoint is best, narrow the search range
+                lr_low = 10 ** ((log_lr_low + log_lr_mid) / 2)
+                lr_high = 10 ** ((log_lr_high + log_lr_mid) / 2)
+
+            logger.report_scalar("loss", "high", high_loss, iteration=i + j)
+            logger.report_scalar("loss", "value", loss, iteration=i + j)
+            logger.report_scalar("loss", "low", low_loss, iteration=i + j)
+
+            print(f"Bounds = [{lr_low:.6f}, {lr_high:.6f}]")
+            print(f"Iteration {i+j}: LR = {lr_mid:.6f}, Loss = {loss:.6f}")
+
+        return best_lr
+
+    def exponential_moving_average(data, alpha=0.03):
+        """
+        Compute exponential moving average using vectorized operations.
+        alpha = 1 - smoothing_factor
+        So for 0.97 smoothing, alpha = 1 - 0.97 = 0.03
+        """
+        weights = (1 - alpha) ** np.arange(len(data))
+        weights /= weights.sum()
+        ema = np.convolve(data, weights, mode="full")[: len(data)]
+        return ema
 
     def train(learning_rate, template_task_id):
         # Clone the template task and override the learning rate
         child_task = Task.clone(
             source_task=template_task_id,
-            name=f"{task_name}_lr:{learning_rate:.6f}",
+            name=f"{model_name}_lr:{learning_rate:.6f}",
         )
+
         child_task.set_parameter("Hydra/training.learning_rate", learning_rate)
         print(f"training model with lr: {learning_rate}")
-        for i in range(3):
-            try:
-                Task.enqueue(child_task.id, queue_name=queue_name)
-                child_task.wait_for_status(check_interval_sec=600)
-                break
-            except RuntimeError as e:
-                if i + 1 == 3:
-                    raise e
-                print(e)
-                child_task = Task.clone(
-                    source_task=child_task.id,
-                    name=f"{task_name}_lr:{learning_rate:.6f}",
-                )
+        Task.enqueue(child_task.id, queue_name=queue_name)
+        child_task.wait_for_status(check_interval_sec=120)
 
         # Get the loss from the child task
-        child_task_results = child_task.get_reported_scalars()
+        scalars = child_task.get_reported_scalars()
 
-        return child_task_results["loss"]["loss"]["y"][-1]
+        loss = scalars["loss"]["loss"]["y"]
+        smoothed_loss = exponential_moving_average(loss, alpha=1 - 0.97)
+        return smoothed_loss[-1]
 
     def get_loss(lr):
+        lr = round(lr, 5)
         if lr not in loss_per_learning_rate:
             loss_per_learning_rate[lr] = train(lr, template_task_id)
         return loss_per_learning_rate[lr]
 
-    i = 0
-    current_lr = start_lr
-    best_lr, best_loss = current_lr, get_loss(current_lr)
-    logger.report_scalar("loss", "value", best_loss, iteration=i)
-    while current_lr <= max_lr:
-        i += 1
-        current_lr *= search_mult
-        current_loss = get_loss(current_lr)
-        print(f"Iteration {i}: LR = {current_lr:.6f}, Loss = {current_loss:.6f}")
-        logger.report_scalar("loss", "value", current_loss, iteration=i)
-        if current_loss < best_loss:
-            best_lr, best_loss = current_lr, current_loss
-        else:
-            break
-
+    lr_low, lr_high = exponential_search()
     print("proceeding with binary search now")
-
-    lower_bound, upper_bound = best_lr / search_mult, current_lr
-    while (upper_bound / (lower_bound)) > 1.1:
-        print(np.abs(upper_bound - lower_bound))
-        log_lb, log_ub = np.log10([lower_bound, upper_bound])
-        midpoint = (log_lb + log_ub) / 2
-        loss = get_loss(10**midpoint)
-        i += 1
-        if loss < best_loss:
-            best_loss, best_lr = loss, 10**midpoint
-            lower_bound = midpoint
-        else:
-            upper_bound = midpoint
-
-        logger.report_scalar("loss", "value", loss, iteration=i)
-
-        print(f"Bounds = [{10**lower_bound:.6f}, {10**upper_bound:.6f}]")
-        print(f"Iteration {i}: LR = {midpoint:.6f}, Loss = {loss:.6f}")
+    best_lr = binary_search(lr_low, lr_high)
 
     print(f"\nBest learning rate found: {best_lr:.6f} with loss: {best_loss:.6f}")
 
     parent_task.close()
+    return best_lr
 
 
 @hydra.main(config_path="configs", version_base=None)
@@ -127,8 +163,10 @@ def main(config):
     config = jax_extra.make_dataclass_from_dict(Config, config)
     config_name = hydra.core.hydra_config.HydraConfig.get()["job"]["config_name"]
     project_name, task_name = get_task_details(config)
+
     print(f"{project_name=}")
     print(f"{task_name=}")
+
     template_task_id = Task.get_task(
         project_name=project_name,
         task_name=task_name,

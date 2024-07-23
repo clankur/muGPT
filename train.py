@@ -76,9 +76,6 @@ class Hparams:
     a_output: float
 
 
-perform_coord_check = True
-
-
 @pytree_dataclass
 class Model:
     embed: f32["vocab/t d_model/d"]
@@ -92,8 +89,6 @@ class Model:
     w_up: f32["layers d_model/d d_ff/t"]
     w_down: f32["layers d_model/d d_ff/t"]
     final_layer_norm: f32["d_model/d/t"]
-
-    coord_checks_per_activation = defaultdict(lambda: [])
 
     @staticmethod
     @typechecked

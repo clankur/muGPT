@@ -41,7 +41,7 @@ def lr_sweep(
     model_name,
     queue_name,
     template_task_id,
-    start_lr=0.005400,
+    start_lr=5e-4,
     max_lr=5e-2,
     iterations=5,
     search_mult=3,
@@ -60,8 +60,6 @@ def lr_sweep(
         current_lr = start_lr
 
         while current_lr <= max_lr:
-            i += 1
-            current_lr *= search_mult
             current_loss = get_loss(current_lr)
             print(f"Iteration {i}: LR = {current_lr:.6f}, Loss = {current_loss:.6f}")
             logger.report_scalar("loss", "value", current_loss, iteration=i)
@@ -69,6 +67,8 @@ def lr_sweep(
                 best_lr, best_loss = current_lr, current_loss
             else:
                 break
+            i += 1
+            current_lr *= search_mult
 
         return best_lr / search_mult, best_lr * search_mult
 

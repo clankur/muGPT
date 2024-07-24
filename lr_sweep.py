@@ -7,6 +7,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Optional, Callable, Iterable
 from datetime import datetime
+import json
 
 
 @dataclass
@@ -136,19 +137,20 @@ def lr_sweep(
 
         loss = scalars["loss"]["loss"]["y"]
         smoothed_loss = exponential_moving_average(loss, alpha=1 - 0.97)
-        return smoothed_loss[-1]
+        return smoothed_loss[-1], child_task.id
 
     def get_loss(lr):
         lr = round(lr, 5)
         if lr not in loss_per_learning_rate:
             loss_per_learning_rate[lr] = train(lr, template_task_id)
-        return loss_per_learning_rate[lr]
+        return loss_per_learning_rate[lr][0]
 
     lr_low, lr_high = exponential_search()
     print("proceeding with binary search now")
     best_lr = binary_search(lr_low, lr_high)
 
     print(f"\nBest learning rate found: {best_lr:.6f} with loss: {best_loss:.6f}")
+    print(f"all experiments run: {json.dumps(loss_per_learning_rate)}")
 
     parent_task.close()
     return best_lr

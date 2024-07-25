@@ -62,12 +62,17 @@ def lr_sweep(
 
         while current_lr <= max_lr:
             current_loss = get_loss(current_lr)
-            print(f"Iteration {i}: LR = {current_lr:.6f}, Loss = {current_loss:.6f}")
-            logger.report_scalar("loss", "value", current_loss, iteration=i)
             if current_loss < best_loss:
                 best_lr, best_loss = current_lr, current_loss
             else:
                 break
+            print(f"Iteration {i}: LR = {current_lr:.6f}, Loss = {current_loss:.6f}")
+            logger.report_scalar("loss", "value", current_loss, iteration=i)
+            logger.report_scalar("lr", "value", current_lr, iteration=i)
+
+            logger.report_scalar("loss", "best", best_loss, iteration=i)
+            logger.report_scalar("lr", "best", best_lr, iteration=i)
+
             i += 1
             current_lr *= search_mult
 
@@ -91,6 +96,19 @@ def lr_sweep(
                 if loss < best_loss:
                     best_loss, best_lr = loss, lr
 
+            logger.report_scalar("loss", "best", best_loss, iteration=i + j)
+            logger.report_scalar("lr", "best", best_lr, iteration=i)
+
+            logger.report_scalar("loss", "upper", high_loss, iteration=i + j)
+            logger.report_scalar("loss", "value", loss, iteration=i + j)
+            logger.report_scalar("loss", "lower", low_loss, iteration=i + j)
+            logger.report_scalar("lr", "upper", lr_high, iteration=i + j)
+            logger.report_scalar("lr", "value", lr_mid, iteration=i + j)
+            logger.report_scalar("lr", "lower", lr_low, iteration=i + j)
+
+            print(f"Bounds = [{lr_low:.6f}, {lr_high:.6f}]")
+            print(f"Iteration {i+j}: LR = {lr_mid:.6f}, Loss = {loss:.6f}")
+
             if low_loss < loss:
                 lr_high = lr_mid
             elif high_loss < loss:
@@ -99,13 +117,6 @@ def lr_sweep(
                 # If midpoint is best, narrow the search range
                 lr_low = 10 ** ((log_lr_low + log_lr_mid) / 2)
                 lr_high = 10 ** ((log_lr_high + log_lr_mid) / 2)
-
-            logger.report_scalar("loss", "high", high_loss, iteration=i + j)
-            logger.report_scalar("loss", "value", loss, iteration=i + j)
-            logger.report_scalar("loss", "low", low_loss, iteration=i + j)
-
-            print(f"Bounds = [{lr_low:.6f}, {lr_high:.6f}]")
-            print(f"Iteration {i+j}: LR = {lr_mid:.6f}, Loss = {loss:.6f}")
 
         return best_lr
 

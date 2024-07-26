@@ -81,7 +81,8 @@ def lr_sweep(
     def binary_search(lr_low, lr_high):
         nonlocal best_loss, best_lr
 
-        for j in range(iterations):
+        for j in range(1, iterations + 1):
+            print(f"Bounds = [{lr_low:.6f}, {lr_high:.6f}]")
             log_lr_low, log_lr_high = np.log10([lr_low, lr_high])
 
             log_lr_mid = (log_lr_low + log_lr_high) / 2
@@ -97,7 +98,7 @@ def lr_sweep(
                     best_loss, best_lr = loss, lr
 
             logger.report_scalar("loss", "best", best_loss, iteration=i + j)
-            logger.report_scalar("lr", "best", best_lr, iteration=i)
+            logger.report_scalar("lr", "best", best_lr, iteration=i + j)
 
             logger.report_scalar("loss", "upper", high_loss, iteration=i + j)
             logger.report_scalar("loss", "value", loss, iteration=i + j)
@@ -106,7 +107,6 @@ def lr_sweep(
             logger.report_scalar("lr", "value", lr_mid, iteration=i + j)
             logger.report_scalar("lr", "lower", lr_low, iteration=i + j)
 
-            print(f"Bounds = [{lr_low:.6f}, {lr_high:.6f}]")
             print(f"Iteration {i+j}: LR = {lr_mid:.6f}, Loss = {loss:.6f}")
 
             if low_loss < loss:
@@ -133,11 +133,11 @@ def lr_sweep(
 
     def train(learning_rate, template_task_id):
         # Clone the template task and override the learning rate
-        child_task = Task.clone(
+        child_task: Task = Task.clone(
             source_task=template_task_id,
             name=f"{model_name}_lr:{learning_rate:.6f}",
         )
-
+        child_task.set_system_tags([])
         child_task.set_parameter("Hydra/training.learning_rate", learning_rate)
         print(f"training model with lr: {learning_rate}")
         Task.enqueue(child_task.id, queue_name=queue_name)

@@ -112,14 +112,12 @@ class Model:
         d_model_scale = 1 / (math.sqrt(h.d_model) * truncated_normal_stddev)
 
         w_kv_scale = d_model_scale
-        w_q_scale = d_model_scale * h.a_attn * math.sqrt(base.d_model) / h.d_model
-
+        w_q_scale = d_model_scale
         total_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
         w_o_scale = 1 / (math.sqrt(total_head_dim) * truncated_normal_stddev)
         w_up_scale = d_model_scale
         w_down_scale = 1 / (math.sqrt(h.d_ff) * truncated_normal_stddev)
-        unembed_scale = h.a_output * math.sqrt(base.d_model) / h.d_model
-
+        unembed_scale = 1 / math.sqrt(base.d_model)
         w_kv_shape = (h.layers, 2, h.d_model, h.n_kv, h.d_head)
         w_kv = w_kv_scale * jax.random.truncated_normal(
             fold_in_str(rng, "w_kv"), -2, 2, w_kv_shape, dtype=jnp.float32
@@ -218,7 +216,9 @@ class Model:
             k = save_for_backward(k)
             v = save_for_backward(v)
             k = rope_table.apply("L d -> 1 L 1 d", k)
-            logits = shardops.einsum_unreduced(
+
+            logit_scale = h.a_attn * math.sqrt(h.base.d_head) / h.d_head
+            logits = logit_scale * shardops.einsum_unreduced(
                 "B/d Qlen Q K/t D, B/d Klen K/t D -> B/d Qlen Klen Q K/t",
                 q,
                 k,
@@ -278,7 +278,10 @@ class Model:
         x = shardops.all_gather("B/d L M/t -> B/d L M", x)
         ln = shardops.all_gather("M/t/d -> M", jnp.float32(self.final_layer_norm))
         x = jnp.bfloat16(rms_norm(x) * ln)
-        unembed = shardops.all_gather("V/t M/d -> V/t M", jnp.bfloat16(self.unembed))
+        unembed_scale = h.a_output * h.base.d_model / h.d_model
+        unembed = unembed_scale * shardops.all_gather(
+            "V/t M/d -> V/t M", jnp.bfloat16(self.unembed)
+        )
         logits = shardops.einsum_unreduced(
             "B/d L M, V/t M -> B/d L V/t",
             x,
@@ -459,9 +462,7 @@ def training_step(
             ln2=1.0,
             w_q=h.d_model / base.d_model,
             w_kv=h.d_model / base.d_model,
-            w_o=h.d_head
-            * h.n_kv
-            * h.n_q_per_kv
+            w_o=(h.d_head * h.n_kv * h.n_q_per_kv)
             / (base.d_head * base.n_kv * base.n_q_per_kv),
             w_gate=h.d_model / base.d_model,
             w_up=h.d_model / base.d_model,

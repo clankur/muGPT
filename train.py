@@ -1,4 +1,5 @@
 """Main training loop, including the model, loss function, and optimizer."""
+
 import operator
 import os
 import time
@@ -6,8 +7,10 @@ import subprocess
 import signal
 
 import env
+
 env.set_variables()
 import shardlib.shardtypes as shardtypes
+
 shardtypes.register_with_typeguard()
 import gcsfs  # Needed for clearml setup
 
@@ -23,9 +26,16 @@ from jax import Array, lax
 from jax.sharding import PartitionSpec
 import jax.numpy as jnp
 import math
-from input_loader import FlatTokensParams, HuggingFaceDataParams, TokenBatch, TokenBatchParams, get_loader
+from input_loader import (
+    FlatTokensParams,
+    HuggingFaceDataParams,
+    TokenBatch,
+    TokenBatchParams,
+    get_loader,
+)
 from shardlib.shardtypes import bf16, bool_, f32, pytree_dataclass, u32, make_shardings
 import shardlib.shardops as shardops
+
 P = PartitionSpec
 import einops
 import jax_extra
@@ -40,426 +50,548 @@ import signal
 
 PRNGKey = Any
 
+
 @dataclass(frozen=True)
 class BaseWidths:
-  d_model: int
-  n_q_per_kv: int
-  n_kv: int
-  d_head:int
-  layers: int
-  d_ff: int
+    d_model: int
+    n_q_per_kv: int
+    n_kv: int
+    d_head: int
+    layers: int
+    d_ff: int
+
 
 @dataclass(frozen=True)
 class Hparams:
-  d_model: int
-  n_q_per_kv: int
-  n_kv: int
-  d_head: int
-  layers: int
-  vocab: int
-  d_ff: int
-  rope_max_timescale: int
-  base: BaseWidths
-  a_attn: float
-  a_output: float
+    d_model: int
+    n_q_per_kv: int
+    n_kv: int
+    d_head: int
+    layers: int
+    vocab: int
+    d_ff: int
+    rope_max_timescale: int
+    base: BaseWidths
+    a_attn: float
+    a_output: float
+
 
 @pytree_dataclass
 class LayerMetrics:
-  query: f32[b'layers']
-  key: f32[b'layers']
-  value: f32[b'layers']
-  attn_out: f32[b'layers']
-  up_proj: f32[b'layers']
-  ffn_out: f32[b'layers']
+    query: f32[b"layers"]
+    key: f32[b"layers"]
+    value: f32[b"layers"]
+    attn_out: f32[b"layers"]
+    up_proj: f32[b"layers"]
+    ffn_out: f32[b"layers"]
+
 
 @pytree_dataclass
 class Model:
-  embed: f32['vocab/t d_model/d']
-  unembed: f32['vocab/t d_model/d']
-  ln1: f32['layers d_model/t/d']
-  ln2: f32['layers d_model/t/d']
-  w_q: f32['layers d_model/d n_q_per_kv n_kv/t d_head']
-  w_kv: f32['layers 2 d_model/d n_kv/t d_head']
-  w_o: f32['layers d_model/d n_q_per_kv n_kv/t d_head']
-  w_gate: f32['layers d_model/d d_ff/t']
-  w_up: f32['layers d_model/d d_ff/t']
-  w_down: f32['layers d_model/d d_ff/t']
-  final_layer_norm: f32['d_model/d/t']
+    embed: f32["vocab/t d_model/d"]
+    unembed: f32["vocab/t d_model/d"]
+    ln1: f32["layers d_model/t/d"]
+    ln2: f32["layers d_model/t/d"]
+    w_q: f32["layers d_model/d n_q_per_kv n_kv/t d_head"]
+    w_kv: f32["layers 2 d_model/d n_kv/t d_head"]
+    w_o: f32["layers d_model/d n_q_per_kv n_kv/t d_head"]
+    w_gate: f32["layers d_model/d d_ff/t"]
+    w_up: f32["layers d_model/d d_ff/t"]
+    w_down: f32["layers d_model/d d_ff/t"]
+    final_layer_norm: f32["d_model/d/t"]
 
+    @staticmethod
+    @typechecked
+    def init(h: Hparams, rng: PRNGKey) -> "Model":
+        embed = jax.random.normal(
+            jax_extra.fold_in_str(rng, "embed"), (h.vocab, h.d_model), dtype=jnp.float32
+        )
+        # https://github.com/google/jax/issues/20390 for ones_like with sharding.
+        ln1 = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
+        ln2 = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
+        final_layer_norm = jnp.ones((h.d_model,), dtype=jnp.float32)
 
-  @staticmethod
-  @typechecked
-  def init(h: Hparams, rng: PRNGKey) -> 'Model':
-    embed = jax.random.normal(jax_extra.fold_in_str(rng, 'embed'), (h.vocab, h.d_model), dtype=jnp.float32)
-    # https://github.com/google/jax/issues/20390 for ones_like with sharding.
-    ln1 = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
-    ln2 = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
-    final_layer_norm = jnp.ones((h.d_model,), dtype=jnp.float32)
-    
-    # All of wi/wq/wo/wo/w_kv use truncated_normal initializers with 'fan_in' scaling,
-    # i.e. variance set to 1.0/fan_in.
-    # The constant is stddev of standard normal truncated to (-2, 2)
-    truncated_normal_stddev = .87962566103423978
+        # All of wi/wq/wo/wo/w_kv use truncated_normal initializers with 'fan_in' scaling,
+        # i.e. variance set to 1.0/fan_in.
+        # The constant is stddev of standard normal truncated to (-2, 2)
+        truncated_normal_stddev = 0.87962566103423978
 
-    base = h.base
+        base = h.base
 
-    # scale for tensors with d_model fan_in and truncated normal truncated to (-2, 2)
-    d_model_scale = 1 / (math.sqrt(h.d_model) * truncated_normal_stddev)
+        # scale for tensors with d_model fan_in and truncated normal truncated to (-2, 2)
+        d_model_scale = 1 / (math.sqrt(h.d_model) * truncated_normal_stddev)
 
-    w_kv_scale = d_model_scale
-    w_q_scale = d_model_scale * h.a_attn * math.sqrt(base.d_head) / h.d_head 
-    total_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
-    w_o_scale = 1 / (math.sqrt(total_head_dim) * truncated_normal_stddev)
-    w_up_scale = d_model_scale
-    w_down_scale = 1 / (math.sqrt(h.d_ff) * truncated_normal_stddev)
-    unembed_scale = h.a_output * math.sqrt(base.d_model) / h.d_model 
+        w_kv_scale = d_model_scale
+        w_q_scale = d_model_scale * h.a_attn * math.sqrt(base.d_head) / h.d_head
+        total_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
+        w_o_scale = 1 / (math.sqrt(total_head_dim) * truncated_normal_stddev)
+        w_up_scale = d_model_scale
+        w_down_scale = 1 / (math.sqrt(h.d_ff) * truncated_normal_stddev)
+        unembed_scale = h.a_output * math.sqrt(base.d_model) / h.d_model
 
-    w_kv_shape = (h.layers, 2, h.d_model, h.n_kv, h.d_head)
-    w_kv = w_kv_scale * jax.random.truncated_normal(fold_in_str(rng, 'w_kv'), -2, 2, w_kv_shape, dtype=jnp.float32)
-    w_q_shape = (h.layers, h.d_model, h.n_q_per_kv, h.n_kv, h.d_head)
-    w_q = w_q_scale * jax.random.truncated_normal(fold_in_str(rng, 'w_q'), -2, 2, w_q_shape, dtype=jnp.float32)
-    w_o_shape = w_q_shape
-    w_o = w_o_scale * jax.random.truncated_normal(fold_in_str(rng, 'w_o'), -2, 2, w_o_shape, dtype=jnp.float32)
+        w_kv_shape = (h.layers, 2, h.d_model, h.n_kv, h.d_head)
+        w_kv = w_kv_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "w_kv"), -2, 2, w_kv_shape, dtype=jnp.float32
+        )
+        w_q_shape = (h.layers, h.d_model, h.n_q_per_kv, h.n_kv, h.d_head)
+        w_q = w_q_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "w_q"), -2, 2, w_q_shape, dtype=jnp.float32
+        )
+        w_o_shape = w_q_shape
+        w_o = w_o_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "w_o"), -2, 2, w_o_shape, dtype=jnp.float32
+        )
 
-    ff_shape = (h.layers, h.d_model, h.d_ff)
-    w_gate = w_up_scale * jax.random.truncated_normal(fold_in_str(rng, 'w_gate'), -2, 2, ff_shape, dtype=jnp.float32)
-    w_up = w_up_scale * jax.random.truncated_normal(fold_in_str(rng, 'w_up'), -2, 2, ff_shape, dtype=jnp.float32)
-    w_down = w_down_scale * jax.random.truncated_normal(fold_in_str(rng, 'w_down'), -2, 2, ff_shape, dtype=jnp.float32)
+        ff_shape = (h.layers, h.d_model, h.d_ff)
+        w_gate = w_up_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "w_gate"), -2, 2, ff_shape, dtype=jnp.float32
+        )
+        w_up = w_up_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "w_up"), -2, 2, ff_shape, dtype=jnp.float32
+        )
+        w_down = w_down_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "w_down"), -2, 2, ff_shape, dtype=jnp.float32
+        )
 
-    unembed = unembed_scale * jax.random.truncated_normal(fold_in_str(rng, 'unembed'), -2, 2, (h.vocab, h.d_model), dtype=jnp.float32)
-    arrays = Model(
-      embed=embed,
-      unembed=unembed,
-      ln1=ln1,
-      ln2=ln2,
-      w_q=w_q,
-      w_kv=w_kv,
-      w_o=w_o,
-      w_gate=w_gate,
-      w_up=w_up,
-      w_down=w_down,
-      final_layer_norm=final_layer_norm,
-    )
-    shardings = make_shardings(Model)
-    return jax.tree.map(lax.with_sharding_constraint, arrays, shardings)
+        unembed = unembed_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "unembed"), -2, 2, (h.vocab, h.d_model), dtype=jnp.float32
+        )
+        arrays = Model(
+            embed=embed,
+            unembed=unembed,
+            ln1=ln1,
+            ln2=ln2,
+            w_q=w_q,
+            w_kv=w_kv,
+            w_o=w_o,
+            w_gate=w_gate,
+            w_up=w_up,
+            w_down=w_down,
+            final_layer_norm=final_layer_norm,
+        )
+        shardings = make_shardings(Model)
+        return jax.tree.map(lax.with_sharding_constraint, arrays, shardings)
 
+    @typechecked
+    def forward_pass(
+        self, h: Hparams, ids: u32[b"B/d L"], is_seq_start: bool_[b"B/d L"]
+    ) -> Tuple[f32[b"B/d L V/t"], Any]:
+        ##### Initial embedding lookup.
+        embed = shardops.all_gather("V/t M/d -> V/t M", jnp.bfloat16(self.embed))
+        x = shardops.index_unreduced("[V/t] M, B/d L -> B/d L M", embed, ids)
+        x = shardops.psum_scatter("B/d L M -> B/d L M/t", x)
 
-  @typechecked
-  def forward_pass(self, h: Hparams, ids: u32[b'B/d L'], is_seq_start: bool_[b'B/d L']) -> Tuple[f32[b'B/d L V/t'], Any]:
-    ##### Initial embedding lookup.
-    embed = shardops.all_gather('V/t M/d -> V/t M', jnp.bfloat16(self.embed))
-    x = shardops.index_unreduced('[V/t] M, B/d L -> B/d L M', embed, ids)
-    x = shardops.psum_scatter('B/d L M -> B/d L M/t', x)
+        L = ids.shape[1]
+        segment_ids = jnp.cumsum(is_seq_start, axis=1)
+        segment_mask: bool_[b"B/d L L"] = (
+            segment_ids[:, :, jnp.newaxis] == segment_ids[:, jnp.newaxis, :]
+        )
+        segment_mask: bool_[b"B/d L L 1 1"] = segment_mask[
+            ..., jnp.newaxis, jnp.newaxis
+        ]  # add axes for q_per_k, num_kv_heads dimensions
+        causal_mask: bool_[b"1 L L 1 1"] = jnp.tril(
+            jnp.ones((L, L), dtype=jnp.bool_), 0
+        )[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
+        causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
 
-    L = ids.shape[1]
-    segment_ids = jnp.cumsum(is_seq_start, axis=1)
-    segment_mask: bool_[b'B/d L L'] = segment_ids[:, :, jnp.newaxis] == segment_ids[:, jnp.newaxis, :]
-    segment_mask: bool_[b'B/d L L 1 1'] = segment_mask[..., jnp.newaxis, jnp.newaxis] # add axes for q_per_k, num_kv_heads dimensions
-    causal_mask: bool_[b'1 L L 1 1'] = jnp.tril(jnp.ones((L, L), dtype=jnp.bool_), 0)[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
-    causal_mask: bool_[b'B/d L L 1 1'] = jnp.logical_and(segment_mask, causal_mask)
+        rope_table = RopeTable.create(L, h)
 
-    rope_table = RopeTable.create(L, h)
+        ##### Transformer blocks.
+        @explicit_activation_checkpointing
+        def loop_body(
+            x: bf16[b"B/d L M/t"], layer_weights: Any
+        ) -> Tuple[bf16[b"B/d L M/t"], LayerMetrics]:
+            w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2 = layer_weights
 
-    ##### Transformer blocks.
-    @explicit_activation_checkpointing
-    def loop_body(x: bf16[b'B/d L M/t'], layer_weights: Any) -> Tuple[bf16[b'B/d L M/t'], LayerMetrics]:
-      w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2  = layer_weights
+            # Pre-attention RMSNorm
+            ln1 = shardops.all_gather("M/t/d -> M", jnp.float32(ln1))
+            gx = shardops.all_gather("B/d L M/t -> B/d L M", x)
+            nx = jnp.bfloat16(rms_norm(gx) * ln1)
 
-      # Pre-attention RMSNorm
-      ln1 = shardops.all_gather('M/t/d -> M', jnp.float32(ln1))
-      gx = shardops.all_gather('B/d L M/t -> B/d L M', x)
-      nx = jnp.bfloat16(rms_norm(gx) * ln1)
+            # Attention, using Grouped Query Attention and RoPE position embeddings.
+            w_q = shardops.all_gather("M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_q))
+            q = save_for_backward(
+                shardops.einsum_unreduced(
+                    "B/d L M, M Q K/t D -> B/d L Q K/t D", nx, w_q
+                )
+            )
+            q = rope_table.apply("L D -> 1 L 1 1 D", q)
+            w_kv = shardops.all_gather("2 M/d K/t D -> 2 M K/t D", jnp.bfloat16(w_kv))
+            k, v = shardops.einsum_unreduced(
+                "B/d L M, k_v M K/t D -> k_v B/d L K/t D", nx, w_kv
+            )
+            k = save_for_backward(k)
+            v = save_for_backward(v)
 
-      # Attention, using Grouped Query Attention and RoPE position embeddings.
-      w_q = shardops.all_gather('M/d Q K/t D -> M Q K/t D', jnp.bfloat16(w_q))
-      q = save_for_backward(shardops.einsum_unreduced('B/d L M, M Q K/t D -> B/d L Q K/t D', nx, w_q))
-      q = rope_table.apply('L D -> 1 L 1 1 D', q)
-      w_kv = shardops.all_gather('2 M/d K/t D -> 2 M K/t D', jnp.bfloat16(w_kv))
-      k, v = shardops.einsum_unreduced('B/d L M, k_v M K/t D -> k_v B/d L K/t D', nx, w_kv)
-      k = save_for_backward(k)
-      v = save_for_backward(v)
+            k = rope_table.apply("L d -> 1 L 1 d", k)
 
-      k = rope_table.apply('L d -> 1 L 1 d', k)
+            logits = shardops.einsum_unreduced(
+                "B/d Qlen Q K/t D, B/d Klen K/t D -> B/d Qlen Klen Q K/t",
+                q,
+                k,
+                preferred_element_type=jnp.float32,
+            )
+            logits = jnp.where(causal_mask, logits, -1e10)
+            probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
+            attn_out = shardops.einsum_unreduced(
+                "B/d Qlen Klen Q K/t, B/d Klen K/t D -> B/d Qlen Q K/t D", probs, v
+            )
+            w_o = shardops.all_gather("M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_o))
+            attn_out = shardops.einsum_unreduced(
+                "B/d Qlen Q K/t D, M Q K/t D -> B/d Qlen M", attn_out, w_o
+            )
+            attn_out = shardops.psum_scatter("B/d Qlen M -> B/d Qlen M/t", attn_out)
+            x = save_for_backward(x + attn_out)
 
-      
+            # Pre-FFN RMSNorm
+            ln2 = save_for_backward(shardops.all_gather("M/t/d -> M", jnp.float32(ln2)))
+            gx = shardops.all_gather("B/d L M/t -> B/d L M", x)
+            nx = jnp.bfloat16(rms_norm(gx) * ln2)
 
-      logits = shardops.einsum_unreduced(
-        'B/d Qlen Q K/t D, B/d Klen K/t D -> B/d Qlen Klen Q K/t', q, k, preferred_element_type=jnp.float32)
-      logits = jnp.where(causal_mask, logits, -1e10)
-      probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
-      attn_out = shardops.einsum_unreduced(
-        'B/d Qlen Klen Q K/t, B/d Klen K/t D -> B/d Qlen Q K/t D', probs, v)
-      w_o = shardops.all_gather('M/d Q K/t D -> M Q K/t D', jnp.bfloat16(w_o))
-      attn_out = shardops.einsum_unreduced('B/d Qlen Q K/t D, M Q K/t D -> B/d Qlen M', attn_out, w_o)
-      attn_out = shardops.psum_scatter('B/d Qlen M -> B/d Qlen M/t', attn_out)
-      x = save_for_backward(x + attn_out)
+            # FFN, using SwiGLU
+            w_gate = shardops.all_gather("M/d F/t -> M F/t", jnp.bfloat16(w_gate))
+            gate_proj = save_for_backward(
+                shardops.einsum_unreduced("B/d L M, M F/t -> B/d L F/t", nx, w_gate)
+            )
+            w_up = shardops.all_gather("M/d F/t -> M F/t", jnp.bfloat16(w_up))
+            up_proj = save_for_backward(
+                shardops.einsum_unreduced("B/d L M, M F/t -> B/d L F/t", nx, w_up)
+            )
+            y = jax.nn.swish(gate_proj) * up_proj
+            w_down = shardops.all_gather("M/d F/t -> M F/t", jnp.bfloat16(w_down))
+            ffn_out = shardops.einsum_unreduced(
+                "B/d L F/t, M F/t -> B/d L M", y, w_down
+            )
+            ffn_out = shardops.psum_scatter("B/d L M -> B/d L M/t", ffn_out)
 
-      # Pre-FFN RMSNorm
-      ln2 = save_for_backward(shardops.all_gather('M/t/d -> M', jnp.float32(ln2)))
-      gx = shardops.all_gather('B/d L M/t -> B/d L M', x)
-      nx = jnp.bfloat16(rms_norm(gx) * ln2)
+            l1_norm = lambda x: jnp.mean(jnp.abs(x.astype(jnp.float32)))
 
-      # FFN, using SwiGLU
-      w_gate = shardops.all_gather('M/d F/t -> M F/t', jnp.bfloat16(w_gate))
-      gate_proj = save_for_backward(shardops.einsum_unreduced('B/d L M, M F/t -> B/d L F/t', nx, w_gate))
-      w_up = shardops.all_gather('M/d F/t -> M F/t', jnp.bfloat16(w_up))
-      up_proj = save_for_backward(shardops.einsum_unreduced('B/d L M, M F/t -> B/d L F/t', nx, w_up))
-      y = jax.nn.swish(gate_proj) * up_proj
-      w_down = shardops.all_gather('M/d F/t -> M F/t', jnp.bfloat16(w_down))
-      ffn_out = shardops.einsum_unreduced('B/d L F/t, M F/t -> B/d L M', y, w_down)
-      ffn_out = shardops.psum_scatter('B/d L M -> B/d L M/t', ffn_out)
-        
-      l1_norm = lambda x: jnp.mean(jnp.abs(x.astype(jnp.float32)))
+            layer_metrics = LayerMetrics(
+                query=l1_norm(q),
+                key=l1_norm(k),
+                value=l1_norm(v),
+                attn_out=l1_norm(attn_out),
+                up_proj=l1_norm(up_proj),
+                ffn_out=l1_norm(ffn_out),
+            )
 
-      layer_metrics = LayerMetrics(
-        query=l1_norm(q),
-        key=l1_norm(k),
-        value=l1_norm(v),
-        attn_out=l1_norm(attn_out),
-        up_proj=l1_norm(up_proj),
-        ffn_out=l1_norm(ffn_out)
-      )
+            return jnp.bfloat16(x + ffn_out), layer_metrics
 
-      return jnp.bfloat16(x + ffn_out), layer_metrics 
+        x, layer_metrics = jax.lax.scan(
+            loop_body,
+            jnp.bfloat16(x),
+            (
+                self.w_q,
+                self.w_kv,
+                self.w_o,
+                self.w_gate,
+                self.w_up,
+                self.w_down,
+                self.ln1,
+                self.ln2,
+            ),
+        )
 
-    x, layer_metrics = jax.lax.scan(loop_body, jnp.bfloat16(x), (self.w_q, self.w_kv, self.w_o, self.w_gate, self.w_up, self.w_down, self.ln1, self.ln2))
+        ##### Final layernorm and output projection.
+        x = shardops.all_gather("B/d L M/t -> B/d L M", x)
+        ln = shardops.all_gather("M/t/d -> M", jnp.float32(self.final_layer_norm))
+        x = jnp.bfloat16(rms_norm(x) * ln)
+        unembed = shardops.all_gather("V/t M/d -> V/t M", jnp.bfloat16(self.unembed))
+        logits = shardops.einsum_unreduced(
+            "B/d L M, V/t M -> B/d L V/t",
+            x,
+            unembed,
+            preferred_element_type=jnp.float32,
+        )
 
-    ##### Final layernorm and output projection.
-    x = shardops.all_gather('B/d L M/t -> B/d L M', x)
-    ln = shardops.all_gather('M/t/d -> M', jnp.float32(self.final_layer_norm))
-    x = jnp.bfloat16(rms_norm(x) * ln)
-    unembed = shardops.all_gather('V/t M/d -> V/t M', jnp.bfloat16(self.unembed))
-    logits = shardops.einsum_unreduced('B/d L M, V/t M -> B/d L V/t', x, unembed, preferred_element_type=jnp.float32)
+        return logits, layer_metrics
 
-    return logits, layer_metrics 
+    @typechecked
+    def loss(self, h: Hparams, batch: TokenBatch) -> Tuple[f32[b""], LayerMetrics]:
+        # Given sequence-packed targets:
+        #   [[1, 2], [3, 4, 5], [6, 7, 8, 9]]
+        # we want inputs:
+        #   [[0, 1], [0, 3, 4], [0, 6, 7, 8]]
+        # which we get by shifting the targets right by 1 and
+        # masking sequence-start tokens to 0.
+        inputs = jnp.pad(batch.targets[:, :-1], pad_width=((0, 0), (1, 0)))
+        is_seq_start: bool_[b"batch/d len"] = batch.is_seq_start
+        inputs: u32[b"batch/d len"] = jnp.where(is_seq_start, 0, inputs)
 
+        logits, layer_metrics = self.forward_pass(
+            h, inputs, is_seq_start
+        )  # add layer_metrics
 
-  @typechecked
-  def loss(self, h: Hparams, batch: TokenBatch) -> Tuple[f32[b''], LayerMetrics]:
-    # Given sequence-packed targets:
-    #   [[1, 2], [3, 4, 5], [6, 7, 8, 9]]
-    # we want inputs:
-    #   [[0, 1], [0, 3, 4], [0, 6, 7, 8]]
-    # which we get by shifting the targets right by 1 and 
-    # masking sequence-start tokens to 0.
-    inputs = jnp.pad(batch.targets[:, :-1], pad_width=((0, 0), (1, 0)))
-    is_seq_start: bool_[b'batch/d len'] = batch.is_seq_start
-    inputs: u32[b'batch/d len'] = jnp.where(is_seq_start, 0, inputs)
+        logits: f32[b"batch/d len V/t"] = logits
 
-    logits, layer_metrics = self.forward_pass(h, inputs, is_seq_start) # add layer_metrics 
-    
-
-    logits: f32[b'batch/d len V/t'] = logits
-
-    max_logits: f32[b'batch/d len 1'] = lax.pmax(jnp.max(lax.stop_gradient(logits), axis=-1, keepdims=True), 't')
-    logits = logits - max_logits
-    sum_logits = lax.psum(jnp.sum(jnp.exp(logits), axis=-1, keepdims=True), 't')
-    logsumexp = jnp.log(sum_logits)
-    logprobs: f32[b'batch/d len V/t'] = logits - logsumexp
-    logprobs_at_targets = shardops.index_unreduced('batch/d len [V/t], batch/d len -> batch/d len', logprobs, batch.targets)
-    logprobs_at_targets = shardops.psum_scatter('batch/d len -> batch/d len/t', logprobs_at_targets)
-    tokens_in_global_batch = logprobs_at_targets.size * jax.lax.psum(1, ('d', 't'))
-    return -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch), layer_metrics 
+        max_logits: f32[b"batch/d len 1"] = lax.pmax(
+            jnp.max(lax.stop_gradient(logits), axis=-1, keepdims=True), "t"
+        )
+        logits = logits - max_logits
+        sum_logits = lax.psum(jnp.sum(jnp.exp(logits), axis=-1, keepdims=True), "t")
+        logsumexp = jnp.log(sum_logits)
+        logprobs: f32[b"batch/d len V/t"] = logits - logsumexp
+        logprobs_at_targets = shardops.index_unreduced(
+            "batch/d len [V/t], batch/d len -> batch/d len", logprobs, batch.targets
+        )
+        logprobs_at_targets = shardops.psum_scatter(
+            "batch/d len -> batch/d len/t", logprobs_at_targets
+        )
+        tokens_in_global_batch = logprobs_at_targets.size * jax.lax.psum(1, ("d", "t"))
+        return (
+            -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch),
+            layer_metrics,
+        )
 
 
 @pytree_dataclass
 class RopeTable:
-  sin: f32['len d_head2']
-  cos: f32['len d_head2']
+    sin: f32["len d_head2"]
+    cos: f32["len d_head2"]
 
-  @staticmethod
-  def create(max_len: int, hparams: Hparams) -> 'RopeTable':
-    rope_max_timescale = hparams.rope_max_timescale
-    d_head = hparams.d_head
-    d = d_head // 2
-    # endpoint=False is equivalent to what MaxText does. endpoint=True would be more natural, though.
-    timescale = jnp.logspace(0, jnp.log10(jnp.float32(rope_max_timescale)), d, endpoint=False)
-    position = jnp.arange(max_len, dtype=jnp.int32)
-    sinusoid_inp = jnp.float32(position[:, jnp.newaxis]) / timescale[jnp.newaxis, :]
-    sin = jnp.sin(sinusoid_inp)
-    cos = jnp.cos(sinusoid_inp)
-    return RopeTable(sin=sin, cos=cos)
-  
-  def apply(self, rearrange_spec, x):
-    x1, x2 = jnp.split(x, 2, axis=-1)
-    sin = einops.rearrange(self.sin, rearrange_spec)
-    cos = einops.rearrange(self.cos, rearrange_spec)
-    r1 = x1 * cos - x2 * sin
-    r2 = x2 * cos + x1 * sin
-    return jnp.append(r1, r2, axis=-1)
+    @staticmethod
+    def create(max_len: int, hparams: Hparams) -> "RopeTable":
+        rope_max_timescale = hparams.rope_max_timescale
+        d_head = hparams.d_head
+        d = d_head // 2
+        # endpoint=False is equivalent to what MaxText does. endpoint=True would be more natural, though.
+        timescale = jnp.logspace(
+            0, jnp.log10(jnp.float32(rope_max_timescale)), d, endpoint=False
+        )
+        position = jnp.arange(max_len, dtype=jnp.int32)
+        sinusoid_inp = jnp.float32(position[:, jnp.newaxis]) / timescale[jnp.newaxis, :]
+        sin = jnp.sin(sinusoid_inp)
+        cos = jnp.cos(sinusoid_inp)
+        return RopeTable(sin=sin, cos=cos)
+
+    def apply(self, rearrange_spec, x):
+        x1, x2 = jnp.split(x, 2, axis=-1)
+        sin = einops.rearrange(self.sin, rearrange_spec)
+        cos = einops.rearrange(self.cos, rearrange_spec)
+        r1 = x1 * cos - x2 * sin
+        r2 = x2 * cos + x1 * sin
+        return jnp.append(r1, r2, axis=-1)
 
 
 @typechecked
-def rms_norm(x: bf16[b'batch/d len M']) -> bf16[b'batch/d len M']:
-  mean2 = save_for_backward(jnp.mean(jax.lax.square(jnp.float32(x)), axis=-1, keepdims=True))
-  return jnp.bfloat16(x * jax.lax.rsqrt(mean2 + 1e-6))
+def rms_norm(x: bf16[b"batch/d len M"]) -> bf16[b"batch/d len M"]:
+    mean2 = save_for_backward(
+        jnp.mean(jax.lax.square(jnp.float32(x)), axis=-1, keepdims=True)
+    )
+    return jnp.bfloat16(x * jax.lax.rsqrt(mean2 + 1e-6))
 
 
 @pytree_dataclass
 class Metrics:
-  loss: f32[b'']
-  learning_rate: f32[b'']
-  grad_norm: f32[b'']
-  raw_grad_norm: f32[b'']
+    loss: f32[b""]
+    learning_rate: f32[b""]
+    grad_norm: f32[b""]
+    raw_grad_norm: f32[b""]
+
 
 @dataclass(frozen=True)
 class TrainingHparams:
-  adam_b1: float
-  adam_b2: float
-  adam_eps: float
-  adam_eps_root: float
-  weight_decay: float
-  warmup_steps: int
-  steps: int
-  steps_for_lr: int
-  cosine_learning_rate_final_fraction: float
-  learning_rate: float
-  tokens: TokenBatchParams
-  seed: int
-  queue: Optional[str] = None
-  use_grad_clip: bool = True
+    adam_b1: float
+    adam_b2: float
+    adam_eps: float
+    adam_eps_root: float
+    weight_decay: float
+    warmup_steps: int
+    steps: int
+    steps_for_lr: int
+    cosine_learning_rate_final_fraction: float
+    learning_rate: float
+    tokens: TokenBatchParams
+    seed: int
+    queue: Optional[str] = None
+    use_grad_clip: bool = True
+
 
 @pytree_dataclass
 class State:
-  weights: Model
-  adam_mu: Model
-  adam_nu: Model
+    weights: Model
+    adam_mu: Model
+    adam_nu: Model
 
-  @staticmethod
-  def init(hparams: Hparams, rng: PRNGKey) -> 'State':
-    weights = Model.init(hparams, rng)
-    adam_mu = jax.tree.map(lambda p: p * 0.0, weights)
-    adam_nu = jax.tree.map(lambda p: p * 0.0, weights)
-    return State(weights=weights, adam_mu=adam_mu, adam_nu=adam_nu)
+    @staticmethod
+    def init(hparams: Hparams, rng: PRNGKey) -> "State":
+        weights = Model.init(hparams, rng)
+        adam_mu = jax.tree.map(lambda p: p * 0.0, weights)
+        adam_nu = jax.tree.map(lambda p: p * 0.0, weights)
+        return State(weights=weights, adam_mu=adam_mu, adam_nu=adam_nu)
+
 
 @partial(jax.jit, static_argnums=(2, 3), donate_argnums=(0,))
-def training_step(state: State, step: u32[b''], h: Hparams, hparams: TrainingHparams, batch: TokenBatch) -> Tuple[Any, Metrics, LayerMetrics]:
-  @partial(shardtypes.typed_shard_map, check_rep=False)  # check_rep=False for https://github.com/google/jax/issues/20335
-  def sharded_step(state: State, step: u32[b''], batch: TokenBatch) -> Tuple[State, Metrics, LayerMetrics]:
-    print(f'{step=}')
-    ( loss, layer_metrics), grad = jax.value_and_grad(lambda weights: weights.loss(h, batch), has_aux=True)(state.weights) # TODO: have to add have_aux = True, unpack loss and metrics
+def training_step(
+    state: State,
+    step: u32[b""],
+    h: Hparams,
+    hparams: TrainingHparams,
+    batch: TokenBatch,
+) -> Tuple[Any, Metrics, LayerMetrics]:
+    @partial(
+        shardtypes.typed_shard_map, check_rep=False
+    )  # check_rep=False for https://github.com/google/jax/issues/20335
+    def sharded_step(
+        state: State, step: u32[b""], batch: TokenBatch
+    ) -> Tuple[State, Metrics, LayerMetrics]:
+        print(f"{step=}")
+        (loss, layer_metrics), grad = jax.value_and_grad(
+            lambda weights: weights.loss(h, batch), has_aux=True
+        )(
+            state.weights
+        )  # TODO: have to add have_aux = True, unpack loss and metrics
 
-    # Gradients have already been reduced across chips because the gradient of the weight `all_gather`
-    # is weight-gradient `psum_scatter`. Loss, on the other hand, hasn't been reduced across chips: if we
-    # did that inside the autodiff, we'd be double-reducing the loss, effectively multiplying it by the 
-    # amount of data parallelism.
-    #
-    # So we reduce the loss across chips _outside_ the autodiff.
-    loss = jax.lax.psum(loss, ('d', 't'))
-    print(f'{loss=}')
+        # Gradients have already been reduced across chips because the gradient of the weight `all_gather`
+        # is weight-gradient `psum_scatter`. Loss, on the other hand, hasn't been reduced across chips: if we
+        # did that inside the autodiff, we'd be double-reducing the loss, effectively multiplying it by the
+        # amount of data parallelism.
+        #
+        # So we reduce the loss across chips _outside_ the autodiff.
+        loss = jax.lax.psum(loss, ("d", "t"))
+        print(f"{loss=}")
 
-    # Other than global-norm of gradients, no other communication is needed during the weight update,
-    # because weights and grads are already fully sharded, as checked below.
+        # Other than global-norm of gradients, no other communication is needed during the weight update,
+        # because weights and grads are already fully sharded, as checked below.
 
-    # Calculate learning rate from step number.
-    # We use linear warmup then cosine decay. See https://arxiv.org/pdf/2307.09288.pdf section 2.2
-    warmup_lr = (jnp.float32(step) / jnp.float32(hparams.warmup_steps)) * hparams.learning_rate
-    cosine = jnp.cos(jnp.pi * (jnp.float32(step - hparams.warmup_steps) / jnp.float32(hparams.steps_for_lr - hparams.warmup_steps)))
-    cosine_lr = hparams.learning_rate * (hparams.cosine_learning_rate_final_fraction + (1 - hparams.cosine_learning_rate_final_fraction) * (cosine * .5 + .5))
-    lr = jnp.where(step < hparams.warmup_steps, warmup_lr, cosine_lr)    
+        # Calculate learning rate from step number.
+        # We use linear warmup then cosine decay. See https://arxiv.org/pdf/2307.09288.pdf section 2.2
+        warmup_lr = (
+            jnp.float32(step) / jnp.float32(hparams.warmup_steps)
+        ) * hparams.learning_rate
+        cosine = jnp.cos(
+            jnp.pi
+            * (
+                jnp.float32(step - hparams.warmup_steps)
+                / jnp.float32(hparams.steps_for_lr - hparams.warmup_steps)
+            )
+        )
+        cosine_lr = hparams.learning_rate * (
+            hparams.cosine_learning_rate_final_fraction
+            + (1 - hparams.cosine_learning_rate_final_fraction) * (cosine * 0.5 + 0.5)
+        )
+        lr = jnp.where(step < hparams.warmup_steps, warmup_lr, cosine_lr)
 
-    # AdamW optimizer with global gradient clipping.
-    grad_leaves, grad_treedef = jax.tree_util.tree_flatten(grad)
-    global_norm_square = jnp.float32(0.0)
-    for g in grad_leaves:
-      assert g.dtype == jnp.float32
-      global_norm_square += jnp.sum(jax.lax.square(g))
-    global_norm_square = jax.lax.psum(global_norm_square, ('d', 't'))
-    global_norm = jnp.sqrt(global_norm_square)
+        # AdamW optimizer with global gradient clipping.
+        grad_leaves, grad_treedef = jax.tree_util.tree_flatten(grad)
+        global_norm_square = jnp.float32(0.0)
+        for g in grad_leaves:
+            assert g.dtype == jnp.float32
+            global_norm_square += jnp.sum(jax.lax.square(g))
+        global_norm_square = jax.lax.psum(global_norm_square, ("d", "t"))
+        global_norm = jnp.sqrt(global_norm_square)
 
-    base = h.base
-    
-    if hparams.use_grad_clip:
-      rescale = jnp.minimum(1.0, 1.0 / global_norm)
-    else:
-      rescale = 1.0
-     
-    lr_scales = Model(
-      embed=1.0,
-      unembed=1.0,
-      ln1=1.0,
-      ln2=1.0,
-      w_q=h.d_model/base.d_model,
-      w_kv=h.d_model/base.d_model,
-      w_o=h.d_head * h.n_kv * h.n_q_per_kv/(base.d_head * base.n_kv * base.n_q_per_kv),
-      w_gate=h.d_model/base.d_model,
-      w_up=h.d_model/base.d_model,
-      w_down=h.d_ff/base.d_ff,
-      final_layer_norm=1.0
-    )
+        base = h.base
 
-    new_ps = []
-    new_mus = []
-    new_nus = []
-    print("applying backprop")
-    for p, g, mu, nu, spec, scale in zip(tree_leaves(state.weights), grad_leaves, tree_leaves(state.adam_mu), tree_leaves(state.adam_nu), tree_leaves(shardtypes.make_partition_specs(State)), tree_leaves(lr_scales)):
-      assert shardtypes.is_fully_sharded(spec), 'Weight update is only correctly scaled for fully sharded weights.'
-      # Gradient clipping
-      g = g * rescale
-      # Adam scaling
-      mu = (1 - hparams.adam_b1) * g + hparams.adam_b1 * mu
-      nu = (1 - hparams.adam_b2) * jax.lax.square(g) + hparams.adam_b2 * nu
-      # We need step numbers to start at 1, not 0. Otherwise the bias correction produces NaN.
-      completed_steps = step + 1  
-      mu_hat = mu / (1 - jnp.float32(hparams.adam_b1)**completed_steps)
-      nu_hat = nu / (1 - jnp.float32(hparams.adam_b2)**completed_steps)
-      g = mu_hat / (jnp.sqrt(nu_hat + hparams.adam_eps_root) + hparams.adam_eps)
-      # Weight decay
-      g += hparams.weight_decay * p
-      # Learning rate
-      g *= lr
+        if hparams.use_grad_clip:
+            rescale = jnp.minimum(1.0, 1.0 / global_norm)
+        else:
+            rescale = 1.0
 
-      # Apply update
-      new_ps.append(p - g)
-      new_mus.append(mu)
-      new_nus.append(nu)
-    
-    new_state = State(
-      weights=jax.tree_util.tree_unflatten(grad_treedef, new_ps),
-      adam_mu=jax.tree_util.tree_unflatten(grad_treedef, new_mus),
-      adam_nu=jax.tree_util.tree_unflatten(grad_treedef, new_nus),
-    )
-    metrics = Metrics(
-      loss=loss,
-      learning_rate=lr,
-      grad_norm=global_norm * rescale,
-      raw_grad_norm=global_norm,
-    )
-    return new_state, metrics, layer_metrics
-  
-  return sharded_step(state, step, batch)
+        lr_scales = Model(
+            embed=1.0,
+            unembed=1.0,
+            ln1=1.0,
+            ln2=1.0,
+            w_q=h.d_model / base.d_model,
+            w_kv=h.d_model / base.d_model,
+            w_o=h.d_head
+            * h.n_kv
+            * h.n_q_per_kv
+            / (base.d_head * base.n_kv * base.n_q_per_kv),
+            w_gate=h.d_model / base.d_model,
+            w_up=h.d_model / base.d_model,
+            w_down=h.d_ff / base.d_ff,
+            final_layer_norm=1.0,
+        )
+
+        new_ps = []
+        new_mus = []
+        new_nus = []
+        print("applying backprop")
+        for p, g, mu, nu, spec, scale in zip(
+            tree_leaves(state.weights),
+            grad_leaves,
+            tree_leaves(state.adam_mu),
+            tree_leaves(state.adam_nu),
+            tree_leaves(shardtypes.make_partition_specs(State)),
+            tree_leaves(lr_scales),
+        ):
+            assert shardtypes.is_fully_sharded(
+                spec
+            ), "Weight update is only correctly scaled for fully sharded weights."
+            # Gradient clipping
+            g = g * rescale
+            # Adam scaling
+            mu = (1 - hparams.adam_b1) * g + hparams.adam_b1 * mu
+            nu = (1 - hparams.adam_b2) * jax.lax.square(g) + hparams.adam_b2 * nu
+            # We need step numbers to start at 1, not 0. Otherwise the bias correction produces NaN.
+            completed_steps = step + 1
+            mu_hat = mu / (1 - jnp.float32(hparams.adam_b1) ** completed_steps)
+            nu_hat = nu / (1 - jnp.float32(hparams.adam_b2) ** completed_steps)
+            g = mu_hat / (jnp.sqrt(nu_hat + hparams.adam_eps_root) + hparams.adam_eps)
+            # Weight decay
+            g += hparams.weight_decay * p
+            # Learning rate
+            g *= lr
+
+            # Apply update
+            new_ps.append(p - g)
+            new_mus.append(mu)
+            new_nus.append(nu)
+
+        new_state = State(
+            weights=jax.tree_util.tree_unflatten(grad_treedef, new_ps),
+            adam_mu=jax.tree_util.tree_unflatten(grad_treedef, new_mus),
+            adam_nu=jax.tree_util.tree_unflatten(grad_treedef, new_nus),
+        )
+        metrics = Metrics(
+            loss=loss,
+            learning_rate=lr,
+            grad_norm=global_norm * rescale,
+            raw_grad_norm=global_norm,
+        )
+        return new_state, metrics, layer_metrics
+
+    return sharded_step(state, step, batch)
 
 
 @dataclass(frozen=True)
 class Paths:
-  root_working_dir: str
-  model_name: Optional[str]
+    root_working_dir: str
+    model_name: Optional[str]
+
 
 @dataclass(frozen=True)
 class MeshConfig:
-  d: int
-  t: int
+    d: int
+    t: int
 
 
 @dataclass(frozen=True)
 class Config:
-  model: Hparams
-  training: TrainingHparams
-  paths: Paths
-  num_hosts: int
-  checkpoint_interval: int
-  mesh: MeshConfig
-  io: training_io.IOConfig
-  flat_tokens: Optional[FlatTokensParams] = None
-  hf_dataset: Optional[HuggingFaceDataParams] = None
+    model: Hparams
+    training: TrainingHparams
+    paths: Paths
+    num_hosts: int
+    checkpoint_interval: int
+    mesh: MeshConfig
+    io: training_io.IOConfig
+    flat_tokens: Optional[FlatTokensParams] = None
+    hf_dataset: Optional[HuggingFaceDataParams] = None
 
-  def __post_init__(self):
-    assert self.flat_tokens is not None or self.hf_dataset is not None, 'Must provide either flat_tokens or hf_dataset.'
-    assert not (self.flat_tokens is not None and self.hf_dataset is not None), 'Should not specify both flat_tokens and hf_dataset.'
+    def __post_init__(self):
+        assert (
+            self.flat_tokens is not None or self.hf_dataset is not None
+        ), "Must provide either flat_tokens or hf_dataset."
+        assert not (
+            self.flat_tokens is not None and self.hf_dataset is not None
+        ), "Should not specify both flat_tokens and hf_dataset."
 
-  @cached_property
-  def training_data(self) -> Union[FlatTokensParams, HuggingFaceDataParams]:
-    return self.flat_tokens or self.hf_dataset
+    @cached_property
+    def training_data(self) -> Union[FlatTokensParams, HuggingFaceDataParams]:
+        return self.flat_tokens or self.hf_dataset
+
 
 def main_contained(config: Config, logger):
     """Main program, which does not access external services except as specified by config.paths or logger."""
@@ -514,7 +646,7 @@ def main_contained(config: Config, logger):
             cum_metrics.grad_norm += metrics.grad_norm
             cum_metrics.raw_grad_norm += metrics.raw_grad_norm
             cum_metrics.learning_rate += metrics.learning_rate
-            
+
         for step in range(start_step, config.training.steps):
             # if step % config.checkpoint_interval == 0 and step > start_step:
             #   training_io.save_checkpoint(model_dir, step, state, config.io)
@@ -561,55 +693,78 @@ def main_contained(config: Config, logger):
                 else:
                     cum_metrics = output
                 training_io.log(step, logger, cum_metrics)
-                training_io.log_coord_check(config.model.d_model, logger, step, layer_metrics)
-                cum_metrics = output 
+                training_io.log_coord_check(
+                    config.model.d_model, logger, step, layer_metrics
+                )
+                cum_metrics = output
             else:
-                update_metrics(output) 
+                update_metrics(output)
+
 
 def clear_tpu_locks():
-  try:
-    raw_pids = subprocess.run(['lsof', '-w', '/dev/accel0'], capture_output=True, text=True).stdout
-    pids = set()
-    for line in raw_pids.splitlines()[1:]:  
-      parts = line.split()
-      if len(parts) > 1:
-        pids.add(parts[1])
-    for pid in pids:
-      os.kill(int(pid), signal.SIGTERM)
-    if pids:
-      os.remove('/tmp/libtpu_lockfile')
-  except Exception as e:
-    print(f'Error clearing TPU locks: {e}')
-    pass
+    try:
+        raw_pids = subprocess.run(
+            ["lsof", "-w", "/dev/accel0"], capture_output=True, text=True
+        ).stdout
+        pids = set()
+        for line in raw_pids.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) > 1:
+                pids.add(parts[1])
+        for pid in pids:
+            os.kill(int(pid), signal.SIGTERM)
+        if pids:
+            os.remove("/tmp/libtpu_lockfile")
+    except Exception as e:
+        print(f"Error clearing TPU locks: {e}")
+        pass
+
 
 def get_model_name(config_name: str):
-  overrides = hydra.core.hydra_config.HydraConfig.get()['job']['override_dirname']
-  print(overrides)
-  overrides = ','.join(overrides.split(',')[1:]).replace("=", ':')
-  return f"{config_name}_{overrides}" if overrides else config_name
+    overrides = hydra.core.hydra_config.HydraConfig.get()["job"]["override_dirname"]
+    print(overrides)
+    overrides = ",".join(overrides.split(",")[1:]).replace("=", ":")
+    return f"{config_name}_{overrides}" if overrides else config_name
 
-@hydra.main(config_path='configs', version_base=None)
+
+@hydra.main(config_path="configs", version_base=None)
 def main(config):
-  config = jax_extra.make_dataclass_from_dict(Config, config)
-  if config.training.queue:
-    config_name = hydra.core.hydra_config.HydraConfig.get()['job']['config_name']
-    task_name = config.paths.model_name if config.paths.model_name else get_model_name(config_name)
-    git_branch_name = subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout.strip()
-    task = Task.init(project_name=f'{config_name}/{git_branch_name}', task_name=task_name)
-    logger = task.get_logger()
-    task.execute_remotely(queue_name=config.training.queue)
-    task.launch_multi_node(config.num_hosts, wait=True, queue=config.training.queue + '-workers')
-    clear_tpu_locks()
-    jax.distributed.initialize(os.environ['MASTER_ADDR'] + ':' + os.environ['MASTER_PORT'],
-                        num_processes=int(os.environ['WORLD_SIZE']),
-                        process_id=int(os.environ['RANK']))
-  else:
-    logger = None
-  main_contained(config, logger)
+    config = jax_extra.make_dataclass_from_dict(Config, config)
+    if config.training.queue:
+        config_name = hydra.core.hydra_config.HydraConfig.get()["job"]["config_name"]
+        task_name = (
+            config.paths.model_name
+            if config.paths.model_name
+            else get_model_name(config_name)
+        )
+        git_branch_name = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+        task = Task.init(
+            project_name=f"{config_name}/{git_branch_name}", task_name=task_name
+        )
+        logger = task.get_logger()
+        task.execute_remotely(queue_name=config.training.queue)
+        task.launch_multi_node(
+            config.num_hosts, wait=True, queue=config.training.queue + "-workers"
+        )
+        clear_tpu_locks()
+        jax.distributed.initialize(
+            os.environ["MASTER_ADDR"] + ":" + os.environ["MASTER_PORT"],
+            num_processes=int(os.environ["WORLD_SIZE"]),
+            process_id=int(os.environ["RANK"]),
+        )
+    else:
+        logger = None
+    main_contained(config, logger)
 
-  if not training_io.is_device_0():
-      task.set_system_tags((task.get_system_tags() or []) + ['hidden'])
+    if not training_io.is_device_0():
+        task.set_system_tags((task.get_system_tags() or []) + ["hidden"])
 
 
 if __name__ == "__main__":
-  main()
+    main()

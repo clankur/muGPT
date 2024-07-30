@@ -112,7 +112,6 @@ class Model:
         d_model_scale = 1 / (math.sqrt(h.d_model) * truncated_normal_stddev)
 
         w_kv_scale = d_model_scale
-        # w_q_scale = d_model_scale
         total_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
         w_o_scale = 1 / (math.sqrt(total_head_dim) * truncated_normal_stddev)
         w_up_scale = d_model_scale

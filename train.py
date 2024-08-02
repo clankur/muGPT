@@ -465,9 +465,7 @@ def training_step(
         )
 
         if hparams.use_grad_clip:
-            clip_value = base.d_model / h.d_model
-            # according to claude this might have to be a fixed value across all widths
-            # TODO: check what is correct
+            clip_value = 1.0
             rescale = jnp.minimum(1.0, clip_value / global_norm)
         else:
             rescale = 1.0

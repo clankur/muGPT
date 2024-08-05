@@ -1,6 +1,8 @@
 zarr
 fsspec[gcs]
-jax[tpu]==0.4.26
+jax==0.4.30
+jaxlib==0.4.30
+libtpu-nightly==0.1.dev20240617 
 -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 einops
 hydra-core

@@ -1,0 +1,14 @@
+zarr
+fsspec[gcs]
+jax==0.4.30
+jaxlib==0.4.30
+libtpu-nightly==0.1.dev20240617 
+-f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+einops
+hydra-core
+clearml
+clearml-agent
+typeguard==4.1.5
+transformers  # For Huggingface data loader
+datasets      # For Huggingface data loader
+torch[cpu]    # For Huggingface data loader

@@ -1,6 +1,6 @@
 # Scaling Hyperparameters using Maximal Update Parameterization (muP)
 
-Exploring the best approaches for applying mu-transfer.
+Analyzing the different approaches for applying mu-transfer described in the [Tensor Programs V paper](https://arxiv.org/pdf/2203.03466)
 
 ## Goal
 
@@ -12,7 +12,7 @@ Determine what hyperparameters are more transferable between the base model and 
 - Number of warm up steps
 - Gradient Clipping
 
-As a part of this investigation, we are also attempting to measure the impact of the attention multiplier and output multiplier used by muP and the importance of applying 0 initialization to the LM head and query's weights.
+As part of this investigation, we are also attempting to measure the impact of the attention multiplier and output multiplier used by μP and the importance of applying zero initialization to the unembed and query's projection matrices.
 
 ## Investigation Procedure
 

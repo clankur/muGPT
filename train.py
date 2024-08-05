@@ -15,13 +15,14 @@ shardtypes.register_with_typeguard()
 import gcsfs  # Needed for clearml setup
 
 import datetime
+from collections import defaultdict
 from functools import cached_property, partial
 from typing import Any, Optional, Tuple, Union
 import hydra
 from typeguard import typechecked
 from dataclasses import dataclass
 import jax
-from jax import lax
+from jax import Array, lax
 from jax.sharding import PartitionSpec
 import jax.numpy as jnp
 import math
@@ -45,8 +46,19 @@ from clearml import Task
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from jax.tree_util import tree_leaves
+import signal
 
 PRNGKey = Any
+
+
+@dataclass(frozen=True)
+class BaseWidths:
+    d_model: int
+    n_q_per_kv: int
+    n_kv: int
+    d_head: int
+    layers: int
+    d_ff: int
 
 
 @dataclass(frozen=True)
@@ -59,6 +71,9 @@ class Hparams:
     vocab: int
     d_ff: int
     rope_max_timescale: int
+    base: BaseWidths
+    a_attn: float
+    a_output: float
 
 
 @pytree_dataclass
@@ -91,29 +106,23 @@ class Model:
         # The constant is stddev of standard normal truncated to (-2, 2)
         truncated_normal_stddev = 0.87962566103423978
 
+        base = h.base
+
         # scale for tensors with d_model fan_in and truncated normal truncated to (-2, 2)
         d_model_scale = 1 / (math.sqrt(h.d_model) * truncated_normal_stddev)
 
         w_kv_scale = d_model_scale
-        w_q_scale = d_model_scale / math.sqrt(h.d_head)
         total_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
         w_o_scale = 1 / (math.sqrt(total_head_dim) * truncated_normal_stddev)
         w_up_scale = d_model_scale
         w_down_scale = 1 / (math.sqrt(h.d_ff) * truncated_normal_stddev)
-        unembed_scale = d_model_scale
+        w_kv_shape = (h.layers, 2, h.d_model, h.n_kv, h.d_head)
+        w_kv = w_kv_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "w_kv"), -2, 2, w_kv_shape, dtype=jnp.float32
+        )
 
-        w_kv_shape = (h.layers, 2, h.d_model, h.n_kv, h.d_head)
-        w_kv = w_kv_scale * jax.random.truncated_normal(
-            fold_in_str(rng, "w_kv"), -2, 2, w_kv_shape, dtype=jnp.float32
-        )
         w_q_shape = (h.layers, h.d_model, h.n_q_per_kv, h.n_kv, h.d_head)
-        w_q = w_q_scale * jax.random.truncated_normal(
-            fold_in_str(rng, "w_q"), -2, 2, w_q_shape, dtype=jnp.float32
-        )
-        w_kv_shape = (h.layers, 2, h.d_model, h.n_kv, h.d_head)
-        w_kv = w_kv_scale * jax.random.truncated_normal(
-            fold_in_str(rng, "w_kv"), -2, 2, w_kv_shape, dtype=jnp.float32
-        )
+        w_q = jnp.zeros(w_q_shape, dtype=jnp.float32)
         w_o_shape = w_q_shape
         w_o = w_o_scale * jax.random.truncated_normal(
             fold_in_str(rng, "w_o"), -2, 2, w_o_shape, dtype=jnp.float32
@@ -130,9 +139,8 @@ class Model:
             fold_in_str(rng, "w_down"), -2, 2, ff_shape, dtype=jnp.float32
         )
 
-        unembed = unembed_scale * jax.random.truncated_normal(
-            fold_in_str(rng, "unembed"), -2, 2, (h.vocab, h.d_model), dtype=jnp.float32
-        )
+        unembed = jnp.zeros((h.vocab, h.d_model), dtype=jnp.float32)
+
         arrays = Model(
             embed=embed,
             unembed=unembed,
@@ -194,6 +202,7 @@ class Model:
                 )
             )
             q = rope_table.apply("L D -> 1 L 1 1 D", q)
+            print(f"{q.shape}")
             w_kv = shardops.all_gather("2 M/d K/t D -> 2 M K/t D", jnp.bfloat16(w_kv))
             k, v = shardops.einsum_unreduced(
                 "B/d L M, k_v M K/t D -> k_v B/d L K/t D", nx, w_kv
@@ -201,7 +210,9 @@ class Model:
             k = save_for_backward(k)
             v = save_for_backward(v)
             k = rope_table.apply("L d -> 1 L 1 d", k)
-            logits = shardops.einsum_unreduced(
+
+            logit_scale = h.a_attn * math.sqrt(h.base.d_head) / h.d_head
+            logits = logit_scale * shardops.einsum_unreduced(
                 "B/d Qlen Q K/t D, B/d Klen K/t D -> B/d Qlen Klen Q K/t",
                 q,
                 k,
@@ -261,7 +272,10 @@ class Model:
         x = shardops.all_gather("B/d L M/t -> B/d L M", x)
         ln = shardops.all_gather("M/t/d -> M", jnp.float32(self.final_layer_norm))
         x = jnp.bfloat16(rms_norm(x) * ln)
-        unembed = shardops.all_gather("V/t M/d -> V/t M", jnp.bfloat16(self.unembed))
+        unembed_scale = h.a_output * h.base.d_model / h.d_model
+        unembed = unembed_scale * shardops.all_gather(
+            "V/t M/d -> V/t M", jnp.bfloat16(self.unembed)
+        )
         logits = shardops.einsum_unreduced(
             "B/d L M, V/t M -> B/d L V/t",
             x,
@@ -432,20 +446,40 @@ def training_step(
             global_norm_square += jnp.sum(jax.lax.square(g))
         global_norm_square = jax.lax.psum(global_norm_square, ("d", "t"))
         global_norm = jnp.sqrt(global_norm_square)
+
+        base = h.base
+
+        lr_scales = Model(
+            embed=1.0,
+            unembed=1.0,
+            ln1=1.0,
+            ln2=1.0,
+            w_q=h.d_model / base.d_model,
+            w_kv=h.d_model / base.d_model,
+            w_o=(h.d_head * h.n_kv * h.n_q_per_kv)
+            / (base.d_head * base.n_kv * base.n_q_per_kv),
+            w_gate=h.d_model / base.d_model,
+            w_up=h.d_model / base.d_model,
+            w_down=h.d_ff / base.d_ff,
+            final_layer_norm=1.0,
+        )
+
         if hparams.use_grad_clip:
-            rescale = jnp.minimum(1.0, 1.0 / global_norm)
+            clip_value = 1.0
+            rescale = jnp.minimum(1.0, clip_value / global_norm)
         else:
             rescale = 1.0
 
         new_ps = []
         new_mus = []
         new_nus = []
-        for p, g, mu, nu, spec in zip(
+        for p, g, mu, nu, spec, scale in zip(
             tree_leaves(state.weights),
             grad_leaves,
             tree_leaves(state.adam_mu),
             tree_leaves(state.adam_nu),
             tree_leaves(shardtypes.make_partition_specs(State)),
+            tree_leaves(lr_scales),
         ):
             assert shardtypes.is_fully_sharded(
                 spec
@@ -463,7 +497,7 @@ def training_step(
             # Weight decay
             g += hparams.weight_decay * p
             # Learning rate
-            g *= lr
+            g *= lr / scale
 
             # Apply update
             new_ps.append(p - g)

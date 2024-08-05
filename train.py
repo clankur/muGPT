@@ -671,6 +671,7 @@ def main(config):
         task = Task.init(
             project_name=f"{config_name}/{git_branch_name}", task_name=task_name
         )
+        task.set_packages("requirements-tpu.txt")
         task.add_tags([git_branch_name])
         logger = task.get_logger()
         task.execute_remotely(queue_name=config.training.queue)

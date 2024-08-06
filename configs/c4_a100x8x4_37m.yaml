@@ -10,9 +10,9 @@ mesh:
   t: 1
 
 training:
-  warmup_steps: 2900 
-  steps:        29000 
-  steps_for_lr: 29000
+  warmup_steps: 290 
+  steps:        2900 
+  steps_for_lr: 2900
   learning_rate: 0.010660
   tokens:
     batch: 256

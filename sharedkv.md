@@ -21,5 +21,6 @@ As a part of my next batch of experiments, I'd like to determine how it compares
 
 Here a links to past experiments to see how SharedKV compares to MHA:
 
+- [37m Shared KV vs GQA vs MQA](https://embed.clear.ml/projects/*/compare-experiments;ids=0249f68bc4a04509a8415290abb78fe7,5f3a814b7d1b4e71bb9f2527348c0ea2,6c5d1d9ead334f42a2bddb76752047d3/scalars/graph?metricVariants=loss&metricName=&params=loss)
 - [270m Shared KV vs MHA]()
 - [1b Shared KV vs MHA]() 

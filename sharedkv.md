@@ -6,6 +6,8 @@ Recent research has demonstrated the effectiveness of grouped query attention (G
 
 ## Findings
 
+[Comparing the models at 37m](https://embed.clear.ml/projects/*/compare-experiments;ids=0249f68bc4a04509a8415290abb78fe7,5f3a814b7d1b4e71bb9f2527348c0ea2,6c5d1d9ead334f42a2bddb76752047d3,fdab9d2101444844b79acfbf27fe0684/scalars/graph?metricVariants=loss&metricName=&params=loss), MHA performs achieves the same loss in 12% fewer training steps than GQA, 13% fewer training steps than SharedKV, 15% fewer steps than MQA, indicating all these models are competitive with one another.
+
 So far early results show the approach is promising and doesn't result in a significant model degradation. Comparing a 1b run with SharedKV to the 1b multi-head attention (MHA) baseline run it appears SharedKV lags 7k steps behind MHA, but note this is without performing an learning rate sweep for the model using SharedKV. It's unclear if it would require a different learning rate, but seeing that they have different layout for attention it is something to rule out as a confounding variable. To see the full experiment comparison, you can view it [here on ClearML.]()  
 
 ## Future experiments
@@ -21,6 +23,6 @@ As a part of my next batch of experiments, I'd like to determine how it compares
 
 Here a links to past experiments to see how SharedKV compares to MHA:
 
-- [37m Shared KV vs GQA vs MQA](https://embed.clear.ml/projects/*/compare-experiments;ids=0249f68bc4a04509a8415290abb78fe7,5f3a814b7d1b4e71bb9f2527348c0ea2,6c5d1d9ead334f42a2bddb76752047d3/scalars/graph?metricVariants=loss&metricName=&params=loss)
+- [37m Shared KV vs GQA vs MQA vs MHA](https://embed.clear.ml/projects/*/compare-experiments;ids=0249f68bc4a04509a8415290abb78fe7,5f3a814b7d1b4e71bb9f2527348c0ea2,6c5d1d9ead334f42a2bddb76752047d3,fdab9d2101444844b79acfbf27fe0684/scalars/graph?metricVariants=loss&metricName=&params=loss)
 - [270m Shared KV vs MHA]()
-- [1b Shared KV vs MHA]() 
+- [1b Shared KV vs MHA]()

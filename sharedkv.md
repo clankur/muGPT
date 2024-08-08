@@ -8,7 +8,7 @@ Recent research has demonstrated the effectiveness of grouped query attention (G
 
 [Comparing the models at 37m](https://embed.clear.ml/projects/*/compare-experiments;ids=0249f68bc4a04509a8415290abb78fe7,5f3a814b7d1b4e71bb9f2527348c0ea2,6c5d1d9ead334f42a2bddb76752047d3,fdab9d2101444844b79acfbf27fe0684/scalars/graph?metricVariants=loss&metricName=&params=loss), MHA performs achieves the same loss in 12% fewer training steps than GQA, 13% fewer training steps than SharedKV, 15% fewer steps than MQA, indicating all these models are competitive with one another.
 
-<https://app.clear.ml/projects/c8581c436f894537b651753eb58c0451/compare-experiments;ids=8cb9bbe524e94a5994e7772524c20e0a,3c8dabf252c54c55bd100f4eff2a0c67,6b693d7ccea34457bfe169f977eb386c,6c5d1d9ead334f42a2bddb76752047d3/scalars/graph>
+<https://embed.clear.ml/projects/*/compare-experiments;ids=3c8dabf252c54c55bd100f4eff2a0c67,6b693d7ccea34457bfe169f977eb386c,6c5d1d9ead334f42a2bddb76752047d3,8cb9bbe524e94a5994e7772524c20e0a/scalars/graph?metricVariants=loss&metricName=&params=loss>
 
 - GQA achieves the same loss as MHA with 9% additional training steps
 - SharedKV achives the same loss as GQA with 1.2% additional training steps and the same loss as MHA with 11% additional training steps

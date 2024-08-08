@@ -206,7 +206,9 @@ class Model:
             v = shardops.einsum_unreduced("B/d L M, M K/t D -> B/d L K/t D", nx, w_kv)
             v = save_for_backward(v)
             k = rope_table.apply("L d -> 1 L 1 d", v)
-            logits = shardops.einsum_unreduced(
+
+            logit_scale = h.a_attn * math.sqrt(h.base.d_head) / h.d_head
+            logits = logit_scale * shardops.einsum_unreduced(
                 "B/d Qlen Q K/t D, B/d Klen K/t D -> B/d Qlen Klen Q K/t",
                 q,
                 k,

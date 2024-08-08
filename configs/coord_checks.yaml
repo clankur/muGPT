@@ -1,0 +1,5 @@
+base_model: c4_a100x8x4_10m
+model_family: 
+- 'c4_a100x8x4_10m'
+- 'c4_a100x8x4_37m'
+steps: 10

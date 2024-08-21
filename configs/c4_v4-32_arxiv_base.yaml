@@ -23,7 +23,7 @@ training:
 
 
 flat_tokens:
-  filespec: 'gcs://us_central_datasets/arxiv-flat-tokens-uncompressed.zarr'
+  filespec: 'gcs://us_central_datasets/arxiv-flat-tokens' 
   streams: 4 # Recommended: maximum number of hosts you expect to use.
   read_blocks_per_shuffle_buffer: 2048 # Recommended: 1 << 10. 4GiB (uncompressed) shuffle buffer.
   sequences_per_read_block: 1024

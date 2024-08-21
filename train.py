@@ -74,6 +74,7 @@ class Hparams:
     base: BaseWidths
     a_attn: float
     a_output: float
+    use_zero_init: bool
 
 
 @pytree_dataclass
@@ -121,13 +122,6 @@ class Model:
             fold_in_str(rng, "w_kv"), -2, 2, w_kv_shape, dtype=jnp.float32
         )
 
-        w_q_shape = (h.layers, h.d_model, h.n_q_per_kv, h.n_kv, h.d_head)
-        w_q = jnp.zeros(w_q_shape, dtype=jnp.float32)
-        w_o_shape = w_q_shape
-        w_o = w_o_scale * jax.random.truncated_normal(
-            fold_in_str(rng, "w_o"), -2, 2, w_o_shape, dtype=jnp.float32
-        )
-
         ff_shape = (h.layers, h.d_model, h.d_ff)
         w_gate = w_up_scale * jax.random.truncated_normal(
             fold_in_str(rng, "w_gate"), -2, 2, ff_shape, dtype=jnp.float32
@@ -139,7 +133,28 @@ class Model:
             fold_in_str(rng, "w_down"), -2, 2, ff_shape, dtype=jnp.float32
         )
 
-        unembed = jnp.zeros((h.vocab, h.d_model), dtype=jnp.float32)
+        w_q_scale = d_model_scale
+        w_q_shape = (h.layers, h.d_model, h.n_q_per_kv, h.n_kv, h.d_head)
+        unembed_scale = d_model_scale
+        w_o_shape = w_q_shape
+        w_o = w_o_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "w_o"), -2, 2, w_o_shape, dtype=jnp.float32
+        )
+
+        if h.use_zero_init:
+            w_q = jnp.zeros(w_q_shape, dtype=jnp.float32)
+            unembed = jnp.zeros((h.vocab, h.d_model), dtype=jnp.float32)
+        else:
+            w_q = w_q_scale * jax.random.truncated_normal(
+                fold_in_str(rng, "w_q"), -2, 2, w_q_shape, dtype=jnp.float32
+            )
+            unembed = unembed_scale * jax.random.truncated_normal(
+                fold_in_str(rng, "unembed"),
+                -2,
+                2,
+                (h.vocab, h.d_model),
+                dtype=jnp.float32,
+            )
 
         arrays = Model(
             embed=embed,
@@ -202,7 +217,6 @@ class Model:
                 )
             )
             q = rope_table.apply("L D -> 1 L 1 1 D", q)
-            print(f"{q.shape}")
             w_kv = shardops.all_gather("2 M/d K/t D -> 2 M K/t D", jnp.bfloat16(w_kv))
             k, v = shardops.einsum_unreduced(
                 "B/d L M, k_v M K/t D -> k_v B/d L K/t D", nx, w_kv

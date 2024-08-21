@@ -162,3 +162,4 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 test.py
+configs/c4_v4-32_arxiv_base.yaml

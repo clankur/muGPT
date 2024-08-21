@@ -23,13 +23,12 @@ training:
 
 
 flat_tokens:
-  filespec: 'gcs://us_central_datasets/arxiv-flat-tokens' 
-  streams: 4 # Recommended: maximum number of hosts you expect to use.
-  read_blocks_per_shuffle_buffer: 2048 # Recommended: 1 << 10. 4GiB (uncompressed) shuffle buffer.
+  filespec: 'gcs://us_central_datasets/arxiv-flat-tokens-uncompressed.zarr'
+  streams: 1
+  read_blocks_per_shuffle_buffer: 128
   sequences_per_read_block: 1024
   seed: 0
-  sequence_packing: True
-
+  sequence_packing: true
 paths:
   # root_working_dir can also be a path on a local filesystem
   root_working_dir: "seqax"

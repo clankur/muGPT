@@ -1,5 +1,5 @@
 defaults:
-- c4_v4-32_arxiv_base 
+- arxiv_v4-32_base
 - _self_
 
 num_hosts: 4
@@ -25,7 +25,6 @@ model:
   d_ff: 2048 
   vocab: 32768
   rope_max_timescale: 10000
-  use_zero_init: true 
   a_attn: 1.
   a_output: 1.
   base:
@@ -35,6 +34,6 @@ model:
     d_head: 64
     layers: 8
     d_ff: 2048
-
+  zero_unembed: true
 
 checkpoint_interval: 9200

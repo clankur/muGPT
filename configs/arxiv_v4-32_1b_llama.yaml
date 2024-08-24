@@ -1,0 +1,40 @@
+defaults:
+- arxiv_v4-32_base
+- _self_
+
+num_hosts: 4
+
+mesh:
+  d: 16
+  t: 1
+
+training:
+  warmup_steps: 290 
+  steps:        2900 
+  steps_for_lr: 2900 
+  learning_rate: 4.0e-4
+  tokens:
+    batch: 1024 
+    length: 2048
+
+model:
+  d_model: 2048 
+  n_q_per_kv: 8 
+  n_kv: 4 
+  d_head: 64 
+  layers: 22
+  d_ff: 5632 
+  vocab: 32768
+  rope_max_timescale: 10000
+  a_attn: 1.
+  a_output: 1.
+  base:
+    d_model: 2048 
+    n_q_per_kv: 8
+    n_kv: 4 
+    d_head: 64 
+    layers: 22
+    d_ff: 5632 
+  use_zero_init: true
+
+checkpoint_interval: 9200

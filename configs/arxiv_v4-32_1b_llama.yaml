@@ -5,7 +5,7 @@ defaults:
 num_hosts: 4
 
 mesh:
-  d: 16
+  d: 1 
   t: 1
 
 training:
@@ -14,8 +14,8 @@ training:
   steps_for_lr: 2900 
   learning_rate: 4.0e-4
   tokens:
-    batch: 1024 
-    length: 2048
+    batch: 1
+    length: 5 
 
 model:
   d_model: 2048 
@@ -24,7 +24,7 @@ model:
   d_head: 64 
   layers: 22
   d_ff: 5632 
-  vocab: 32768
+  vocab: 32000 
   rope_max_timescale: 10000
   a_attn: 1.
   a_output: 1.
@@ -38,3 +38,13 @@ model:
   use_zero_init: true
 
 checkpoint_interval: 9200
+
+flat_tokens:
+  filespec: 'gcs://us_central_datasets/tinystories_llama_flat_tokens'
+# hf_dataset:
+#   path: allenai/c4
+#   name: en
+#   num_workers: 0 
+#   tokenizer: NousResearch/Nous-Hermes-llama-2-7b # may require huggingface-cli login
+#   sequences_packed_per_batch: 16
+#   seed: 0

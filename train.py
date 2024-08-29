@@ -74,6 +74,7 @@ class Hparams:
     base: BaseWidths
     a_attn: float
     a_output: float
+    window_size: int
     use_zero_init: bool
 
 
@@ -194,14 +195,20 @@ class Model:
         )[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
         causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
 
+        local_mask = jnp.triu(jnp.ones((L, L), dtype=jnp.bool_), 1 - h.window_size)[
+            jnp.newaxis, ..., jnp.newaxis, jnp.newaxis
+        ]
         rope_table = RopeTable.create(L, h)
 
         ##### Transformer blocks.
         @explicit_activation_checkpointing
         @typechecked
         def loop_body(
-            x: bf16[b"B/d L M/t"], layer_weights: Any
-        ) -> Tuple[bf16[b"B/d L M/t"], Tuple[()]]:
+            carry: Tuple[bf16[b"B/d L M/t"], Union[bool, jax.core.Tracer]],
+            layer_weights: Any,
+        ) -> Tuple[Tuple[bf16[b"B/d L M/t"], Union[bool, jax.core.Tracer]], Tuple[()]]:
+
+            (x, use_local_window_att) = carry
             w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2 = layer_weights
 
             # Pre-attention RMSNorm
@@ -240,6 +247,8 @@ class Model:
             # TODO: a switch for updating causal mask with local window
             # https://github.com/google-deepmind/gemma/blob/a0504162f99a1c238efb37b8197e711c0f3808fd/gemma/modules.py#L148-L158
             # mask should be setup so that elements in the outside window are masked out
+            if use_local_window_att:
+                causal_mask = jnp.logical_and(causal_mask, local_mask)
 
             logits = jnp.where(causal_mask, logits, -1e10)
 
@@ -283,11 +292,11 @@ class Model:
             # TODO: add post FFN RMSNorm
             # https://github.com/google-deepmind/gemma/blob/a0504162f99a1c238efb37b8197e711c0f3808fd/gemma/modules.py#L310-#L312
 
-            return jnp.bfloat16(x + ffn_out), ()
+            return (jnp.bfloat16(x + ffn_out), ~use_local_window_att), ()
 
-        x, () = jax.lax.scan(
+        (x, _), () = jax.lax.scan(
             loop_body,
-            jnp.bfloat16(x),
+            (jnp.bfloat16(x), False),
             (
                 self.w_q,
                 self.w_kv,

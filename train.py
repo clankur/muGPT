@@ -247,10 +247,14 @@ class Model:
             # TODO: a switch for updating causal mask with local window
             # https://github.com/google-deepmind/gemma/blob/a0504162f99a1c238efb37b8197e711c0f3808fd/gemma/modules.py#L148-L158
             # mask should be setup so that elements in the outside window are masked out
-            if use_local_window_att:
-                causal_mask = jnp.logical_and(causal_mask, local_mask)
 
-            logits = jnp.where(causal_mask, logits, -1e10)
+            att_mask = jax.lax.select(
+                use_local_window_att,
+                jnp.logical_and(causal_mask, local_mask),
+                causal_mask,
+            )
+
+            logits = jnp.where(att_mask, logits, -1e10)
 
             probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
             attn_out = shardops.einsum_unreduced(

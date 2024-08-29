@@ -75,6 +75,8 @@ class Hparams:
     a_attn: float
     a_output: float
     window_size: int
+    attn_softcap: float
+    final_softcap: float
     use_zero_init: bool
 
 
@@ -242,7 +244,7 @@ class Model:
 
             # TODO: add softcap = 50.0
             # https://github.com/google-deepmind/gemma/blob/a0504162f99a1c238efb37b8197e711c0f3808fd/gemma/modules.py#L144-#L146
-            # logits = tanh(logits / softcap) * softcap
+            logits = jnp.tanh(logits / h.att_softcap) * h.att_softcap
 
             # TODO: a switch for updating causal mask with local window
             # https://github.com/google-deepmind/gemma/blob/a0504162f99a1c238efb37b8197e711c0f3808fd/gemma/modules.py#L148-L158
@@ -328,7 +330,7 @@ class Model:
             preferred_element_type=jnp.float32,
         )
         # TODO: add final softcap = 30.0
-        # logits = tanh(logits / softcap) * softcap
+        logits = jnp.tanh(logits / h.final_softcap) * h.final_softcap
         return logits
 
     @typechecked

@@ -27,6 +27,8 @@ model:
   rope_max_timescale: 10000
   a_attn: 1.
   a_output: 1.
+  zero_queries: true
+  zero_unembed: true
   base:
     d_model: 256 
     n_q_per_kv: 1
@@ -34,6 +36,5 @@ model:
     d_head: 64
     layers: 8
     d_ff: 2048
-  zero_unembed: true
-
+  
 checkpoint_interval: 9200

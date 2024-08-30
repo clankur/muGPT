@@ -258,9 +258,10 @@ class Model:
             attn_out = shardops.einsum_unreduced(
                 "B/d Qlen Q K/t D, M Q K/t D -> B/d Qlen M", attn_out, w_o
             )
-            attn_out = shardops.psum_scatter("B/d Qlen M -> B/d Qlen M/t", attn_out)
 
             attn_out = rms_norm(attn_out)
+            attn_out = shardops.psum_scatter("B/d Qlen M -> B/d Qlen M/t", attn_out)
+
             x = save_for_backward(x + attn_out)
             # Pre-FFN RMSNorm
             ln2 = save_for_backward(shardops.all_gather("M/t/d -> M", jnp.float32(ln2)))
@@ -284,8 +285,8 @@ class Model:
             ffn_out = shardops.einsum_unreduced(
                 "B/d L F/t, M F/t -> B/d L M", y, w_down
             )
-            ffn_out = shardops.psum_scatter("B/d L M -> B/d L M/t", ffn_out)
             ffn_out = rms_norm(ffn_out)
+            ffn_out = shardops.psum_scatter("B/d L M -> B/d L M/t", ffn_out)
 
             return (jnp.bfloat16(x + ffn_out), ~use_local_window_attn), ()
 

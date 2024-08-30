@@ -34,6 +34,8 @@ model:
     d_head: 64
     layers: 8
     d_ff: 2048
-  zero_unembed: true
-
+  use_zero_init: true
+  window_size: 512 
+  attn_softcap:  50.0
+  final_softcap: 30.0
 checkpoint_interval: 9200

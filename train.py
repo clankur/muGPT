@@ -239,21 +239,13 @@ class Model:
                 preferred_element_type=jnp.float32,
             )
 
-            # TODO: add softcap = 50.0
-            # https://github.com/google-deepmind/gemma/blob/a0504162f99a1c238efb37b8197e711c0f3808fd/gemma/modules.py#L144-#L146
             logits = jnp.tanh(logits / h.attn_softcap) * h.attn_softcap
-
-            # TODO: a switch for updating causal mask with local window
-            # https://github.com/google-deepmind/gemma/blob/a0504162f99a1c238efb37b8197e711c0f3808fd/gemma/modules.py#L148-L158
-            # mask should be setup so that elements in the outside window are masked out
 
             att_mask: bool_[b"1 L L 1 1"] = jax.lax.select(
                 use_local_window_attn,
                 jnp.logical_and(causal_mask, local_mask),
                 causal_mask,
-            )[
-                jnp.newaxis, ..., jnp.newaxis, jnp.newaxis
-            ]
+            )[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
             att_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, att_mask)
 
             logits = jnp.where(att_mask, logits, -1e10)
@@ -267,10 +259,9 @@ class Model:
                 "B/d Qlen Q K/t D, M Q K/t D -> B/d Qlen M", attn_out, w_o
             )
             attn_out = shardops.psum_scatter("B/d Qlen M -> B/d Qlen M/t", attn_out)
-            x = save_for_backward(x + attn_out)
 
-            # TODO: add a post-attention RMSNorm
-            # https://github.com/google-deepmind/gemma/blob/a0504162f99a1c238efb37b8197e711c0f3808fd/gemma/modules.py#L305-#L307
+            attn_out = rms_norm(attn_out)
+            x = save_for_backward(x + attn_out)
             # Pre-FFN RMSNorm
             ln2 = save_for_backward(shardops.all_gather("M/t/d -> M", jnp.float32(ln2)))
             gx = shardops.all_gather("B/d L M/t -> B/d L M", x)
@@ -285,18 +276,16 @@ class Model:
             up_proj = save_for_backward(
                 shardops.einsum_unreduced("B/d L M, M F/t -> B/d L F/t", nx, w_up)
             )
-            # TODO: Switch this section use GeGLU
-            # https://github.com/google-deepmind/gemma/blob/a0504162f99a1c238efb37b8197e711c0f3808fd/gemma/modules.py#L226-L232
-            # jax.nn.gelu(gate_proj) * up_proj
+            # TODO: make activation configurable
+            y = jax.nn.gelu(gate_proj) * up_proj
 
-            y = jax.nn.swish(gate_proj) * up_proj
+            # y = jax.nn.swish(gate_proj) * up_proj
             w_down = shardops.all_gather("M/d F/t -> M F/t", jnp.bfloat16(w_down))
             ffn_out = shardops.einsum_unreduced(
                 "B/d L F/t, M F/t -> B/d L M", y, w_down
             )
             ffn_out = shardops.psum_scatter("B/d L M -> B/d L M/t", ffn_out)
-            # TODO: add post FFN RMSNorm
-            # https://github.com/google-deepmind/gemma/blob/a0504162f99a1c238efb37b8197e711c0f3808fd/gemma/modules.py#L310-#L312
+            ffn_out = rms_norm(ffn_out)
 
             return (jnp.bfloat16(x + ffn_out), ~use_local_window_attn), ()
 
@@ -329,7 +318,6 @@ class Model:
             unembed,
             preferred_element_type=jnp.float32,
         )
-        # TODO: add final softcap = 30.0
         logits = jnp.tanh(logits / h.final_softcap) * h.final_softcap
         return logits
 

@@ -192,14 +192,11 @@ class Model:
         segment_mask: bool_[b"B/d L L 1 1"] = segment_mask[
             ..., jnp.newaxis, jnp.newaxis
         ]  # add axes for q_per_k, num_kv_heads dimensions
-        causal_mask: bool_[b"1 L L 1 1"] = jnp.tril(
-            jnp.ones((L, L), dtype=jnp.bool_), 0
-        )[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
-        causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
+        causal_mask: bool_[b"L L"] = jnp.tril(jnp.ones((L, L), dtype=jnp.bool_), 0)
+        local_mask: bool_[b"L L"] = jnp.triu(
+            jnp.ones((L, L), dtype=jnp.bool_), 1 - h.window_size
+        )
 
-        local_mask = jnp.triu(jnp.ones((L, L), dtype=jnp.bool_), 1 - h.window_size)[
-            jnp.newaxis, ..., jnp.newaxis, jnp.newaxis
-        ]
         rope_table = RopeTable.create(L, h)
 
         ##### Transformer blocks.
@@ -210,7 +207,7 @@ class Model:
             layer_weights: Any,
         ) -> Tuple[Tuple[bf16[b"B/d L M/t"], Union[bool, jax.core.Tracer]], Tuple[()]]:
 
-            (x, use_local_window_att) = carry
+            (x, use_local_window_attn) = carry
             w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2 = layer_weights
 
             # Pre-attention RMSNorm
@@ -244,17 +241,20 @@ class Model:
 
             # TODO: add softcap = 50.0
             # https://github.com/google-deepmind/gemma/blob/a0504162f99a1c238efb37b8197e711c0f3808fd/gemma/modules.py#L144-#L146
-            logits = jnp.tanh(logits / h.att_softcap) * h.att_softcap
+            logits = jnp.tanh(logits / h.attn_softcap) * h.attn_softcap
 
             # TODO: a switch for updating causal mask with local window
             # https://github.com/google-deepmind/gemma/blob/a0504162f99a1c238efb37b8197e711c0f3808fd/gemma/modules.py#L148-L158
             # mask should be setup so that elements in the outside window are masked out
 
-            att_mask = jax.lax.select(
-                use_local_window_att,
+            att_mask: bool_[b"1 L L 1 1"] = jax.lax.select(
+                use_local_window_attn,
                 jnp.logical_and(causal_mask, local_mask),
                 causal_mask,
-            )
+            )[
+                jnp.newaxis, ..., jnp.newaxis, jnp.newaxis
+            ]
+            att_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, att_mask)
 
             logits = jnp.where(att_mask, logits, -1e10)
 
@@ -298,7 +298,7 @@ class Model:
             # TODO: add post FFN RMSNorm
             # https://github.com/google-deepmind/gemma/blob/a0504162f99a1c238efb37b8197e711c0f3808fd/gemma/modules.py#L310-#L312
 
-            return (jnp.bfloat16(x + ffn_out), ~use_local_window_att), ()
+            return (jnp.bfloat16(x + ffn_out), ~use_local_window_attn), ()
 
         (x, _), () = jax.lax.scan(
             loop_body,

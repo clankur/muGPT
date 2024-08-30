@@ -77,7 +77,8 @@ class Hparams:
     window_size: int
     attn_softcap: float
     final_softcap: float
-    use_zero_init: bool
+    zero_queries: bool
+    zero_unembed: bool
 
 
 @pytree_dataclass
@@ -144,13 +145,16 @@ class Model:
             fold_in_str(rng, "w_o"), -2, 2, w_o_shape, dtype=jnp.float32
         )
 
-        if h.use_zero_init:
+        if h.zero_queries:
             w_q = jnp.zeros(w_q_shape, dtype=jnp.float32)
-            unembed = jnp.zeros((h.vocab, h.d_model), dtype=jnp.float32)
         else:
             w_q = w_q_scale * jax.random.truncated_normal(
                 fold_in_str(rng, "w_q"), -2, 2, w_q_shape, dtype=jnp.float32
             )
+
+        if h.zero_unembed:
+            unembed = jnp.zeros((h.vocab, h.d_model), dtype=jnp.float32)
+        else:
             unembed = unembed_scale * jax.random.truncated_normal(
                 fold_in_str(rng, "unembed"),
                 -2,
@@ -158,7 +162,6 @@ class Model:
                 (h.vocab, h.d_model),
                 dtype=jnp.float32,
             )
-
         arrays = Model(
             embed=embed,
             unembed=unembed,

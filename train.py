@@ -195,11 +195,14 @@ class Model:
         segment_mask: bool_[b"B/d L L 1 1"] = segment_mask[
             ..., jnp.newaxis, jnp.newaxis
         ]  # add axes for q_per_k, num_kv_heads dimensions
-        causal_mask: bool_[b"L L"] = jnp.tril(jnp.ones((L, L), dtype=jnp.bool_), 0)
-        local_mask: bool_[b"L L"] = jnp.triu(
+        causal_mask: bool_[b"1 L L 1 1"] = jnp.tril(
+            jnp.ones((L, L), dtype=jnp.bool_), 0
+        )[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
+        local_mask: bool_[b"1 L L 1 1"] = jnp.triu(
             jnp.ones((L, L), dtype=jnp.bool_), 1 - h.window_size
-        )
+        )[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
 
+        causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
         rope_table = RopeTable.create(L, h)
 
         ##### Transformer blocks.
@@ -244,14 +247,13 @@ class Model:
 
             logits = jnp.tanh(logits / h.attn_softcap) * h.attn_softcap
 
-            att_mask: bool_[b"1 L L 1 1"] = jax.lax.select(
+            attn_mask: bool_[b"B/d L L 1 1"] = jax.lax.select(
                 use_local_window_attn,
                 jnp.logical_and(causal_mask, local_mask),
                 causal_mask,
-            )[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
-            att_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, att_mask)
+            )
 
-            logits = jnp.where(att_mask, logits, -1e10)
+            logits = jnp.where(attn_mask, logits, -1e10)
 
             probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
             attn_out = shardops.einsum_unreduced(
@@ -262,8 +264,8 @@ class Model:
                 "B/d Qlen Q K/t D, M Q K/t D -> B/d Qlen M", attn_out, w_o
             )
 
-            attn_out = rms_norm(attn_out)
             attn_out = shardops.psum_scatter("B/d Qlen M -> B/d Qlen M/t", attn_out)
+            attn_out = rms_norm(attn_out)
 
             x = save_for_backward(x + attn_out)
             # Pre-FFN RMSNorm
@@ -288,8 +290,8 @@ class Model:
             ffn_out = shardops.einsum_unreduced(
                 "B/d L F/t, M F/t -> B/d L M", y, w_down
             )
-            ffn_out = rms_norm(ffn_out)
             ffn_out = shardops.psum_scatter("B/d L M -> B/d L M/t", ffn_out)
+            ffn_out = rms_norm(ffn_out)
 
             return (jnp.bfloat16(x + ffn_out), ~use_local_window_attn), ()
 
@@ -385,7 +387,9 @@ class RopeTable:
 
 
 @typechecked
-def rms_norm(x: bf16[b"batch/d len M"]) -> bf16[b"batch/d len M"]:
+def rms_norm(
+    x: Union[bf16[b"batch/d len M"], bf16[b"batch/d len M/t"]]
+) -> Union[bf16[b"batch/d len M"], bf16[b"batch/d len M/t"]]:
     mean2 = save_for_backward(
         jnp.mean(jax.lax.square(jnp.float32(x)), axis=-1, keepdims=True)
     )

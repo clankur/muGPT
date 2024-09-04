@@ -1,0 +1,56 @@
+defaults:
+- arxiv_v4-32_base
+- _self_
+
+num_hosts: 4
+
+mesh:
+  d: 1 
+  t: 1
+
+training:
+  warmup_steps: 290 
+  steps:        2900 
+  steps_for_lr: 2900 
+  learning_rate: 4.0e-4
+  tokens:
+    batch: 1
+    length: 1024 
+
+model:
+  d_model: 2304 
+  n_q_per_kv: 2 
+  n_kv: 4 
+  d_head: 256 
+  layers: 18 
+  d_ff: 9216
+  vocab: 256128
+  rope_max_timescale: 10000
+  a_attn: 1.
+  a_output: 1.
+  zero_queries: true
+  zero_unembed: true
+  window_size: 4096
+  attn_softcap:  50.0
+  final_softcap: 30.0
+  base:
+    d_model: 2048 
+    n_q_per_kv: 8
+    n_kv:  1
+    d_head: 64 
+    layers: 18 
+    d_ff: 16384 
+
+  
+
+checkpoint_interval: 9200
+
+flat_tokens:
+  filespec: 'gcs://us_central_datasets/tinystories_llama_flat_tokens'
+# hf_dataset:
+#   path: allenai/c4
+#   name: en
+#   num_workers: 0 
+#   tokenizer: NousResearch/Nous-Hermes-llama-2-7b # may require huggingface-cli login
+#   sequences_packed_per_batch: 16
+#   seed: 0

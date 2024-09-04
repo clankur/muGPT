@@ -1,5 +1,36 @@
 """Main training loop, including the model, loss function, and optimizer."""
 
+from jax.tree_util import tree_leaves
+from jax.sharding import Mesh
+from jax.experimental import mesh_utils
+from clearml import Task
+import training_io
+from jax_extra import fold_in_str, explicit_activation_checkpointing, save_for_backward
+import jax_extra
+import einops
+import shardlib.shardops as shardops
+from shardlib.shardtypes import bf16, bool_, f32, pytree_dataclass, u32, make_shardings
+from input_loader import (
+    FlatTokensParams,
+    HuggingFaceDataParams,
+    TokenBatch,
+    TokenBatchParams,
+    get_loader,
+)
+import math
+import jax.numpy as jnp
+from jax.sharding import PartitionSpec
+from jax import Array, lax
+import jax
+from dataclasses import dataclass
+from typeguard import typechecked
+import hydra
+from typing import Any, Optional, Tuple, Union
+from functools import cached_property, partial
+from collections import defaultdict
+import datetime
+import gcsfs  # Needed for clearml setup
+import shardlib.shardtypes as shardtypes
 import operator
 import os
 import time
@@ -9,44 +40,11 @@ import signal
 import env
 
 env.set_variables()
-import shardlib.shardtypes as shardtypes
 
 shardtypes.register_with_typeguard()
-import gcsfs  # Needed for clearml setup
 
-import datetime
-from collections import defaultdict
-from functools import cached_property, partial
-from typing import Any, Optional, Tuple, Union
-import hydra
-from typeguard import typechecked
-from dataclasses import dataclass
-import jax
-from jax import Array, lax
-from jax.sharding import PartitionSpec
-import jax.numpy as jnp
-import math
-from input_loader import (
-    FlatTokensParams,
-    HuggingFaceDataParams,
-    TokenBatch,
-    TokenBatchParams,
-    get_loader,
-)
-from shardlib.shardtypes import bf16, bool_, f32, pytree_dataclass, u32, make_shardings
-import shardlib.shardops as shardops
 
 P = PartitionSpec
-import einops
-import jax_extra
-from jax_extra import fold_in_str, explicit_activation_checkpointing, save_for_backward
-import os
-import training_io
-from clearml import Task
-from jax.experimental import mesh_utils
-from jax.sharding import Mesh
-from jax.tree_util import tree_leaves
-import signal
 
 PRNGKey = Any
 
@@ -87,6 +85,8 @@ class Model:
     unembed: f32["vocab/t d_model/d"]
     ln1: f32["layers d_model/t/d"]
     ln2: f32["layers d_model/t/d"]
+    post_attn_ln: f32["layers d_model/t/d"]
+    post_ffn_ln: f32["layers d_model/t/d"]
     w_q: f32["layers d_model/d n_q_per_kv n_kv/t d_head"]
     w_kv: f32["layers 2 d_model/d n_kv/t d_head"]
     w_o: f32["layers d_model/d n_q_per_kv n_kv/t d_head"]
@@ -104,14 +104,14 @@ class Model:
         # https://github.com/google/jax/issues/20390 for ones_like with sharding.
         ln1 = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
         ln2 = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
+        post_attn_ln = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
+        post_ffn_ln = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
         final_layer_norm = jnp.ones((h.d_model,), dtype=jnp.float32)
 
         # All of wi/wq/wo/wo/w_kv use truncated_normal initializers with 'fan_in' scaling,
         # i.e. variance set to 1.0/fan_in.
         # The constant is stddev of standard normal truncated to (-2, 2)
         truncated_normal_stddev = 0.87962566103423978
-
-        base = h.base
 
         # scale for tensors with d_model fan_in and truncated normal truncated to (-2, 2)
         d_model_scale = 1 / (math.sqrt(h.d_model) * truncated_normal_stddev)
@@ -167,6 +167,8 @@ class Model:
             unembed=unembed,
             ln1=ln1,
             ln2=ln2,
+            post_attn_ln=post_attn_ln,
+            post_ffn_ln=post_ffn_ln,
             w_q=w_q,
             w_kv=w_kv,
             w_o=w_o,
@@ -182,10 +184,15 @@ class Model:
     def forward_pass(
         self, h: Hparams, ids: u32[b"B/d L"], is_seq_start: bool_[b"B/d L"]
     ) -> f32[b"B/d L V/t"]:
-        ##### Initial embedding lookup.
-        embed = shardops.all_gather("V/t M/d -> V/t M", jnp.bfloat16(self.embed))
+        # Initial embedding lookup.
+
+        embed = shardops.all_gather(
+            "V/t M/d -> V/t M", jnp.bfloat16(self.embed))
         x = shardops.index_unreduced("[V/t] M, B/d L -> B/d L M", embed, ids)
         x = shardops.psum_scatter("B/d L M -> B/d L M/t", x)
+
+        # TODO: gemma does this for some reason, find why
+        x *= jnp.sqrt(h.d_model)
 
         L = ids.shape[1]
         segment_ids = jnp.cumsum(is_seq_start, axis=1)
@@ -202,10 +209,11 @@ class Model:
             jnp.ones((L, L), dtype=jnp.bool_), 1 - h.window_size
         )[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
 
-        causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
+        causal_mask: bool_[
+            b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
         rope_table = RopeTable.create(L, h)
 
-        ##### Transformer blocks.
+        # Transformer blocks.
         @explicit_activation_checkpointing
         @typechecked
         def loop_body(
@@ -214,7 +222,7 @@ class Model:
         ) -> Tuple[Tuple[bf16[b"B/d L M/t"], Union[bool, jax.core.Tracer]], Tuple[()]]:
 
             (x, use_local_window_attn) = carry
-            w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2 = layer_weights
+            w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2, post_attn_ln, post_ffn_ln = layer_weights
 
             # Pre-attention RMSNorm
             ln1 = shardops.all_gather("M/t/d -> M", jnp.float32(ln1))
@@ -222,17 +230,22 @@ class Model:
             nx = jnp.bfloat16(rms_norm(gx) * ln1)
 
             # Attention, using Grouped Query Attention and RoPE position embeddings.
-            w_q = shardops.all_gather("M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_q))
+            w_q = shardops.all_gather(
+                "M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_q))
             q = save_for_backward(
                 shardops.einsum_unreduced(
                     "B/d L M, M Q K/t D -> B/d L Q K/t D", nx, w_q
                 )
             )
+
             q = rope_table.apply("L D -> 1 L 1 1 D", q)
-            w_kv = shardops.all_gather("2 M/d K/t D -> 2 M K/t D", jnp.bfloat16(w_kv))
+
+            w_kv = shardops.all_gather(
+                "2 M/d K/t D -> 2 M K/t D", jnp.bfloat16(w_kv))
             k, v = shardops.einsum_unreduced(
                 "B/d L M, k_v M K/t D -> k_v B/d L K/t D", nx, w_kv
             )
+
             k = save_for_backward(k)
             v = save_for_backward(v)
             k = rope_table.apply("L d -> 1 L 1 d", k)
@@ -259,39 +272,56 @@ class Model:
             attn_out = shardops.einsum_unreduced(
                 "B/d Qlen Klen Q K/t, B/d Klen K/t D -> B/d Qlen Q K/t D", probs, v
             )
-            w_o = shardops.all_gather("M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_o))
+            w_o = shardops.all_gather(
+                "M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_o))
             attn_out = shardops.einsum_unreduced(
                 "B/d Qlen Q K/t D, M Q K/t D -> B/d Qlen M", attn_out, w_o
             )
 
-            attn_out = shardops.psum_scatter("B/d Qlen M -> B/d Qlen M/t", attn_out)
-            attn_out = rms_norm(attn_out)
+            attn_out = shardops.psum_scatter(
+                "B/d Qlen M -> B/d Qlen M/t", attn_out)
+
+            # Post-Attention RMSNorm
+            post_attn_ln = shardops.all_gather(
+                "M/t/d -> M/t", jnp.float32(post_attn_ln))
+            # attn_out = shardops.all_gather("B/d L M/t -> B/d L M", attn_out)
+            attn_out = jnp.bfloat16(rms_norm(attn_out) * post_attn_ln)
 
             x = save_for_backward(x + attn_out)
             # Pre-FFN RMSNorm
-            ln2 = save_for_backward(shardops.all_gather("M/t/d -> M", jnp.float32(ln2)))
+            ln2 = save_for_backward(shardops.all_gather(
+                "M/t/d -> M", jnp.float32(ln2)))
             gx = shardops.all_gather("B/d L M/t -> B/d L M", x)
             nx = jnp.bfloat16(rms_norm(gx) * ln2)
 
             # FFN, using SwiGLU
-            w_gate = shardops.all_gather("M/d F/t -> M F/t", jnp.bfloat16(w_gate))
+            w_gate = shardops.all_gather(
+                "M/d F/t -> M F/t", jnp.bfloat16(w_gate))
             gate_proj = save_for_backward(
-                shardops.einsum_unreduced("B/d L M, M F/t -> B/d L F/t", nx, w_gate)
+                shardops.einsum_unreduced(
+                    "B/d L M, M F/t -> B/d L F/t", nx, w_gate)
             )
             w_up = shardops.all_gather("M/d F/t -> M F/t", jnp.bfloat16(w_up))
             up_proj = save_for_backward(
-                shardops.einsum_unreduced("B/d L M, M F/t -> B/d L F/t", nx, w_up)
+                shardops.einsum_unreduced(
+                    "B/d L M, M F/t -> B/d L F/t", nx, w_up)
             )
             # TODO: make activation configurable
             y = jax.nn.gelu(gate_proj) * up_proj
 
             # y = jax.nn.swish(gate_proj) * up_proj
-            w_down = shardops.all_gather("M/d F/t -> M F/t", jnp.bfloat16(w_down))
+            w_down = shardops.all_gather(
+                "M/d F/t -> M F/t", jnp.bfloat16(w_down))
             ffn_out = shardops.einsum_unreduced(
                 "B/d L F/t, M F/t -> B/d L M", y, w_down
             )
             ffn_out = shardops.psum_scatter("B/d L M -> B/d L M/t", ffn_out)
-            ffn_out = rms_norm(ffn_out)
+
+            # Post-FFN RMSNorm
+            post_ffn_ln = shardops.all_gather(
+                "M/t/d -> M/t", jnp.float32(post_ffn_ln))
+            # ffn_out = shardops.all_gather("B/d L M/t -> B/d L M", ffn_out)
+            ffn_out = jnp.bfloat16(rms_norm(ffn_out) * post_ffn_ln)
 
             return (jnp.bfloat16(x + ffn_out), ~use_local_window_attn), ()
 
@@ -307,12 +337,15 @@ class Model:
                 self.w_down,
                 self.ln1,
                 self.ln2,
+                self.post_attn_ln,
+                self.post_ffn_ln
             ),
         )
 
-        ##### Final layernorm and output projection.
+        # Final layernorm and output projection.
         x = shardops.all_gather("B/d L M/t -> B/d L M", x)
-        ln = shardops.all_gather("M/t/d -> M", jnp.float32(self.final_layer_norm))
+        ln = shardops.all_gather(
+            "M/t/d -> M", jnp.float32(self.final_layer_norm))
         x = jnp.bfloat16(rms_norm(x) * ln)
         unembed_scale = h.a_output * h.base.d_model / h.d_model
         unembed = unembed_scale * shardops.all_gather(
@@ -339,12 +372,14 @@ class Model:
         is_seq_start: bool_[b"batch/d len"] = batch.is_seq_start
         inputs: u32[b"batch/d len"] = jnp.where(is_seq_start, 0, inputs)
 
-        logits: f32[b"batch/d len V/t"] = self.forward_pass(h, inputs, is_seq_start)
+        logits: f32[b"batch/d len V/t"] = self.forward_pass(
+            h, inputs, is_seq_start)
         max_logits: f32[b"batch/d len 1"] = lax.pmax(
             jnp.max(lax.stop_gradient(logits), axis=-1, keepdims=True), "t"
         )
         logits = logits - max_logits
-        sum_logits = lax.psum(jnp.sum(jnp.exp(logits), axis=-1, keepdims=True), "t")
+        sum_logits = lax.psum(
+            jnp.sum(jnp.exp(logits), axis=-1, keepdims=True), "t")
         logsumexp = jnp.log(sum_logits)
         logprobs: f32[b"batch/d len V/t"] = logits - logsumexp
         logprobs_at_targets = shardops.index_unreduced(
@@ -353,7 +388,8 @@ class Model:
         logprobs_at_targets = shardops.psum_scatter(
             "batch/d len -> batch/d len/t", logprobs_at_targets
         )
-        tokens_in_global_batch = logprobs_at_targets.size * jax.lax.psum(1, ("d", "t"))
+        tokens_in_global_batch = logprobs_at_targets.size * \
+            jax.lax.psum(1, ("d", "t"))
         return -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch)
 
 
@@ -372,7 +408,8 @@ class RopeTable:
             0, jnp.log10(jnp.float32(rope_max_timescale)), d, endpoint=False
         )
         position = jnp.arange(max_len, dtype=jnp.int32)
-        sinusoid_inp = jnp.float32(position[:, jnp.newaxis]) / timescale[jnp.newaxis, :]
+        sinusoid_inp = jnp.float32(
+            position[:, jnp.newaxis]) / timescale[jnp.newaxis, :]
         sin = jnp.sin(sinusoid_inp)
         cos = jnp.cos(sinusoid_inp)
         return RopeTable(sin=sin, cos=cos)
@@ -478,7 +515,8 @@ def training_step(
         )
         cosine_lr = hparams.learning_rate * (
             hparams.cosine_learning_rate_final_fraction
-            + (1 - hparams.cosine_learning_rate_final_fraction) * (cosine * 0.5 + 0.5)
+            + (1 - hparams.cosine_learning_rate_final_fraction) *
+            (cosine * 0.5 + 0.5)
         )
         lr = jnp.where(step < hparams.warmup_steps, warmup_lr, cosine_lr)
 
@@ -498,6 +536,8 @@ def training_step(
             unembed=1.0,
             ln1=1.0,
             ln2=1.0,
+            post_attn_ln=1.0,
+            post_ffn_ln=1.0,
             w_q=h.d_model / base.d_model,
             w_kv=h.d_model / base.d_model,
             w_o=(h.d_head * h.n_kv * h.n_q_per_kv)
@@ -532,12 +572,14 @@ def training_step(
             g = g * rescale
             # Adam scaling
             mu = (1 - hparams.adam_b1) * g + hparams.adam_b1 * mu
-            nu = (1 - hparams.adam_b2) * jax.lax.square(g) + hparams.adam_b2 * nu
+            nu = (1 - hparams.adam_b2) * \
+                jax.lax.square(g) + hparams.adam_b2 * nu
             # We need step numbers to start at 1, not 0. Otherwise the bias correction produces NaN.
             completed_steps = step + 1
             mu_hat = mu / (1 - jnp.float32(hparams.adam_b1) ** completed_steps)
             nu_hat = nu / (1 - jnp.float32(hparams.adam_b2) ** completed_steps)
-            g = mu_hat / (jnp.sqrt(nu_hat + hparams.adam_eps_root) + hparams.adam_eps)
+            g = mu_hat / \
+                (jnp.sqrt(nu_hat + hparams.adam_eps_root) + hparams.adam_eps)
             # Weight decay
             g += hparams.weight_decay * p
             # Learning rate
@@ -610,16 +652,19 @@ def main_contained(config, logger):
     # TODO: check this is true and if not, provide our own that actually is fusable.
     jax.config.update("jax_threefry_partitionable", True)
     with Mesh(
-        mesh_utils.create_device_mesh([config.mesh.d, config.mesh.t], jax.devices()),
+        mesh_utils.create_device_mesh(
+            [config.mesh.d, config.mesh.t], jax.devices()),
         ("d", "t"),
     ):
         root_rng = jax.random.PRNGKey(config.training.seed)
 
-        loader = get_loader("train", config.training_data, config.training.tokens)
+        loader = get_loader("train", config.training_data,
+                            config.training.tokens)
         assert (
             config.model.vocab > loader.max_token_id
         ), f"{config.model.vocab} vs {loader.max_token_id}"
-        config_name = hydra.core.hydra_config.HydraConfig.get()["job"]["config_name"]
+        config_name = hydra.core.hydra_config.HydraConfig.get()[
+            "job"]["config_name"]
         model_name = (
             config.paths.model_name
             if config.paths.model_name
@@ -666,7 +711,8 @@ def main_contained(config, logger):
                 training_io.start_profile()
                 profile_start = time.time()
 
-            state, output = c_training_step(state, jnp.uint32(step), loader.load(step))
+            state, output = c_training_step(
+                state, jnp.uint32(step), loader.load(step))
 
             # Run profile for two steps, to include data loading time in between them.
             if training_io.is_device_0() and step == start_step + 2:
@@ -724,7 +770,8 @@ def clear_tpu_locks():
 
 
 def get_model_name(config_name: str):
-    overrides = hydra.core.hydra_config.HydraConfig.get()["job"]["override_dirname"]
+    overrides = hydra.core.hydra_config.HydraConfig.get()[
+        "job"]["override_dirname"]
     overrides = ",".join(overrides.split(",")[1:]).replace("=", ":")
     return f"{config_name}_{overrides}" if overrides else config_name
 
@@ -733,7 +780,8 @@ def get_model_name(config_name: str):
 def main(config):
     config = jax_extra.make_dataclass_from_dict(Config, config)
     if config.training.queue:
-        config_name = hydra.core.hydra_config.HydraConfig.get()["job"]["config_name"]
+        config_name = hydra.core.hydra_config.HydraConfig.get()[
+            "job"]["config_name"]
         task_name = (
             config.paths.model_name
             if config.paths.model_name

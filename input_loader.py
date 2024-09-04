@@ -42,6 +42,7 @@ from transformers import AutoTokenizer
 from torch.utils.data import DataLoader
 from datasets import load_dataset
 
+
 @dataclass(frozen=True)
 class TokenBatchParams:
     """The shape of a token batch."""
@@ -55,8 +56,6 @@ class TokenBatch:
     targets: u32['batch/d len']
     is_seq_start: bool_['batch/d len']
 
-        
-
 
 @dataclass(frozen=True)
 class FlatTokensParams:
@@ -69,15 +68,17 @@ class FlatTokensParams:
     # buffers. The last minipoch may be shorter than others, but each stream in the last minipoch
     # must have the same number of read blocks, which must also be an integer.
     #
-    # (To minimize discarded data on very small training sets, set streams=1 and make 
+    # (To minimize discarded data on very small training sets, set streams=1 and make
     # sequences_per_read_block small.)
     #
     # Shuffling transforms the uint32[num_tokens] into uint32[streams, sequences, len], the
     # "shuffled tokens". We then form batches by a transformation on [streams, sequences].
 
     streams: int  # Recommended: maximum number of hosts you expect to use.
-    read_blocks_per_shuffle_buffer: int  # Recommended: 1 << 10. 4GiB (uncompressed) shuffle buffer.
-    sequences_per_read_block: int  # Recommended: (1 << 20) / len. 1MiB (compressed) read block.
+    # Recommended: 1 << 10. 4GiB (uncompressed) shuffle buffer.
+    read_blocks_per_shuffle_buffer: int
+    # Recommended: (1 << 20) / len. 1MiB (compressed) read block.
+    sequences_per_read_block: int
     seed: int
     sequence_packing: bool
 
@@ -107,33 +108,40 @@ class ShufflingLoader:
             self.seq_count = token_count // token_batch_params.len
         else:
             self.seq_count = self.seq_starts.shape[0] - 1
-        
+
         # Count read blocks. Round it down to a multiple of streams
         read_block_count = self.seq_count // params.sequences_per_read_block
-        read_block_count = (read_block_count // params.streams) * params.streams
+        read_block_count = (read_block_count //
+                            params.streams) * params.streams
         self.read_block_count = read_block_count
         assert read_block_count > 0, "Must have at least one read block per stream. Try shrinking streams and sequences_per_read_block."
-        self.step_count = (read_block_count * params.sequences_per_read_block) // token_batch_params.batch
-        # Count minipochs        
-        self.minipoch_count = _div_up(read_block_count, params.streams * params.read_blocks_per_shuffle_buffer)
-        self.seq_indices_per_shuffle_buffer = params.read_blocks_per_shuffle_buffer * params.sequences_per_read_block
+        self.step_count = (
+            read_block_count * params.sequences_per_read_block) // token_batch_params.batch
+        # Count minipochs
+        self.minipoch_count = _div_up(
+            read_block_count, params.streams * params.read_blocks_per_shuffle_buffer)
+        self.seq_indices_per_shuffle_buffer = params.read_blocks_per_shuffle_buffer * \
+            params.sequences_per_read_block
         # Calculate batch->stream mapping.
-        self.batch_indices_per_stream = _div_exact(token_batch_params.batch, params.streams)
+        self.batch_indices_per_stream = _div_exact(
+            token_batch_params.batch, params.streams)
         # Calculate which streams and which batch indices this host is responsible for, based on the sharding.
         self.sharding = shardtypes.make_shardings(TokenBatch).targets
         streams = set()
         batch_indices = set()
         for batch_slices, _ in self.sharding.addressable_devices_indices_map((token_batch_params.batch, token_batch_params.len)).values():
-            batch_lo, batch_hi, batch_step = batch_slices.indices(token_batch_params.batch)
+            batch_lo, batch_hi, batch_step = batch_slices.indices(
+                token_batch_params.batch)
             for b in range(batch_lo, batch_hi, batch_step):
                 batch_indices.add(b)
                 streams.add(b // self.batch_indices_per_stream)
-        self.shuffle_buffers_by_stream = {stream_index: None for stream_index in streams}
+        self.shuffle_buffers_by_stream = {
+            stream_index: None for stream_index in streams}
         self.batch_indices = sorted(batch_indices)
         # Shuffle read blocks
         assert read_block_count < 1 << 32, "Too many read blocks. Try growing sequences_per_read_block."
-        self.read_block_ordering = _random_permutation(params.seed, read_block_count)
-
+        self.read_block_ordering = _random_permutation(
+            params.seed, read_block_count)
 
     def load(self, step: int) -> TokenBatch:
         assert step < self.step_count, f"Requested step {step} but dataset only supports {self.step_count} steps at batch size {self.token_batch_params.batch}."
@@ -148,13 +156,14 @@ class ShufflingLoader:
         for batch_index in self.batch_indices:
             # 1. (step, batch_index) -> (stream, seq_index_in_stream)
             stream = batch_index // self.batch_indices_per_stream
-            seq_index_in_stream = step * self.batch_indices_per_stream + (batch_index % self.batch_indices_per_stream)
+            seq_index_in_stream = step * self.batch_indices_per_stream + \
+                (batch_index % self.batch_indices_per_stream)
             # 2. seq_index_in_stream -> (minipoch, seq_index_in_shuffle_buffer)
             minipoch = seq_index_in_stream // self.seq_indices_per_shuffle_buffer
             seq_index_in_shuffle_buffer = seq_index_in_stream % self.seq_indices_per_shuffle_buffer
             shuffle_buffer = self._get_shuffle_buffer(stream, minipoch)
             seq_by_batch_index[batch_index] = shuffle_buffer[seq_index_in_shuffle_buffer]
-    
+
         def get_shard(indexing: Tuple[slice]) -> jax.Array:
             seqlen_slice = indexing[1]
             examples = []
@@ -163,16 +172,18 @@ class ShufflingLoader:
             return np.stack(examples)
 
         shape = (self.token_batch_params.batch, self.token_batch_params.len)
-        encoded_tokens = jax.make_array_from_callback(shape, self.sharding, get_shard)
+        encoded_tokens = jax.make_array_from_callback(
+            shape, self.sharding, get_shard)
         return _decode(encoded_tokens)
-
 
     def _get_shuffle_buffer(self, stream: int, minipoch: int) -> _ShuffleBuffer:
         if self.shuffle_buffers_by_stream[stream] is None or self.shuffle_buffers_by_stream[stream].minipoch != minipoch:
-            self.shuffle_buffers_by_stream[stream] = None  # Free the underlying memory
+            # Free the underlying memory
+            self.shuffle_buffers_by_stream[stream] = None
             blocks_in_shuffle_buffer = self.params.read_blocks_per_shuffle_buffer
             if minipoch == self.minipoch_count - 1:
-                blocks_in_shuffle_buffer = (self.read_block_count // self.params.streams) - self.params.read_blocks_per_shuffle_buffer * minipoch
+                blocks_in_shuffle_buffer = (
+                    self.read_block_count // self.params.streams) - self.params.read_blocks_per_shuffle_buffer * minipoch
             # We form a mapping:
             #   (stream, minipoch, read_block_in_minipoch) -> sequential_read_block
             # then we map
@@ -180,21 +191,24 @@ class ShufflingLoader:
             # using self.shuffled_read_blocks.
             shuffled_read_block_indices = []
             for read_block_in_minipoch in range(blocks_in_shuffle_buffer):
-                sequential_read_block = (minipoch * self.params.read_blocks_per_shuffle_buffer + read_block_in_minipoch) * self.params.streams + stream
+                sequential_read_block = (minipoch * self.params.read_blocks_per_shuffle_buffer +
+                                         read_block_in_minipoch) * self.params.streams + stream
                 shuffled_read_block = self.read_block_ordering[sequential_read_block]
                 shuffled_read_block_indices.append(shuffled_read_block)
-            
+
             # Now load all of the read blocks in parallel.
             def load_read_block(read_block_index: int) -> u32['Buflen len']:
                 start_seq = read_block_index * self.params.sequences_per_read_block
                 end_seq = start_seq + self.params.sequences_per_read_block
-                block_shape = (self.params.sequences_per_read_block, self.token_batch_params.len)
+                block_shape = (self.params.sequences_per_read_block,
+                               self.token_batch_params.len)
                 if self.params.sequence_packing:
-                    flat_tokens = self.encoded_tokens[start_seq * self.token_batch_params.len : end_seq * self.token_batch_params.len]
+                    flat_tokens = self.encoded_tokens[start_seq *
+                                                      self.token_batch_params.len: end_seq * self.token_batch_params.len]
                     return flat_tokens.reshape(block_shape)
                 else:
-                    seq_starts = self.seq_starts[start_seq : end_seq + 1]
-                    flat_tokens = self.encoded_tokens[seq_starts[0] : seq_starts[-1]]
+                    seq_starts = self.seq_starts[start_seq: end_seq + 1]
+                    flat_tokens = self.encoded_tokens[seq_starts[0]                                                      : seq_starts[-1]]
                     # Read the ragged array into a (padded) dense array.
                     #
                     # We pad with 1s, which decode to (0, new_sequence=true).
@@ -204,7 +218,7 @@ class ShufflingLoader:
                         end = seq_starts[i + 1]
                         result[i, :end - start] = flat_tokens[start:end]
                     return result
-            
+
             print(f'[{datetime.datetime.now()}] Loading shuffle buffer')
             # Loading a read block is IO-dominated work, with very little CPU time involved, so we can afford
             # to run a huge number of these in parallel with little concern about thrashing the CPU by having
@@ -214,26 +228,35 @@ class ShufflingLoader:
             # net, allow a lot of threads, potentially way more than we have CPUs! Other overheads will
             # bite us before thread overheads do.
             with ThreadPoolExecutor(max_workers=len(shuffled_read_block_indices)) as executor:
-                shuffled_read_blocks = list(executor.map(load_read_block, shuffled_read_block_indices))
+                shuffled_read_blocks = list(executor.map(
+                    load_read_block, shuffled_read_block_indices))
             shuffle_buffer = np.concatenate(shuffled_read_blocks, axis=0)
-            print(f'[{datetime.datetime.now()}] Finished loading shuffle buffer, {shuffle_buffer.size * 4:_} bytes')
-            
+            print(
+                f'[{datetime.datetime.now()}] Finished loading shuffle buffer, {shuffle_buffer.size * 4:_} bytes')
+
             # Actually shuffle it.
-            sequences_in_shuffle_buffer = blocks_in_shuffle_buffer * self.params.sequences_per_read_block
-            assert shuffle_buffer.shape == (sequences_in_shuffle_buffer, self.token_batch_params.len)
+            sequences_in_shuffle_buffer = blocks_in_shuffle_buffer * \
+                self.params.sequences_per_read_block
+            assert shuffle_buffer.shape == (
+                sequences_in_shuffle_buffer, self.token_batch_params.len)
             shuffle_seed = self.params.seed + 1 + minipoch * self.params.streams + stream
-            permutation = _random_permutation(shuffle_seed, sequences_in_shuffle_buffer)
+            permutation = _random_permutation(
+                shuffle_seed, sequences_in_shuffle_buffer)
             shuffle_buffer = shuffle_buffer[permutation, :]
-            self.shuffle_buffers_by_stream[stream] = _ShuffleBuffer(minipoch, shuffle_buffer)
-        
+            self.shuffle_buffers_by_stream[stream] = _ShuffleBuffer(
+                minipoch, shuffle_buffer)
+
         return self.shuffle_buffers_by_stream[stream].buffer
+
 
 def _div_up(a: int, b: int) -> int:
     return (a + b - 1) // b
 
+
 def _div_exact(a: int, b: int) -> int:
     assert a % b == 0
     return a // b
+
 
 @functools.partial(jax.jit, donate_argnums=(0,))
 @typechecked
@@ -242,9 +265,10 @@ def _decode(encoded_tokens: u32[b'batch/d len']) -> TokenBatch:
     #  2*id+1 for the first token in a sequence
     #  2*id for other tokens in the sequence
     return TokenBatch(
-        targets = encoded_tokens >> 1,
-        is_seq_start = (encoded_tokens & 1) == 1,
+        targets=encoded_tokens >> 1,
+        is_seq_start=(encoded_tokens & 1) == 1,
     )
+
 
 def _random_permutation(seed: int, n: int) -> u32['N']:
     """Same as `np.random.Generator.permutation`, but with a guarantee that it will always produce the same results for a given seed."""
@@ -259,7 +283,8 @@ def _random_permutation(seed: int, n: int) -> u32['N']:
     # because we don't know up front how many random numbers we'll need.) Our approach
     # introduces some bias, but it's small: since n<2^32, the bias is at most 2^-32 for each
     # random number generated. We're fine with this.
-    randoms = np.random.Philox(seed).random_raw(n) % (np.arange(n, dtype=np.uint64) + 1)
+    randoms = np.random.Philox(seed).random_raw(
+        n) % (np.arange(n, dtype=np.uint64) + 1)
     result = np.arange(n, dtype=np.uint32)
     for i in reversed(range(n)):
         j = randoms[i]
@@ -278,6 +303,7 @@ class HuggingFaceDataParams:
     name: Optional[str] = None
     seed: int = 0
 
+
 class HuggingFaceDataLoader:
     """
     The HuggingFaceDataLoader is provided for convenience and ease of setup,
@@ -288,6 +314,7 @@ class HuggingFaceDataLoader:
     This datalaoder will waste tokens if you pack too many sequences into a batch,
     and does not support instant resume to an arbitrary step.
     """
+
     def __init__(self, split, config: HuggingFaceDataParams, token_batch_params: TokenBatchParams):
         self.tokenizer = AutoTokenizer.from_pretrained(config.tokenizer)
         self.batch_size = token_batch_params.batch
@@ -297,16 +324,22 @@ class HuggingFaceDataLoader:
         assert 0 in self.tokenizer.all_special_ids, "Tokenizer must have a special 0 token"
 
         # setup an iterator over the dataset
-        tokenize = functools.partial(self.tokenizer, padding=False, truncation=False, max_length=None, add_special_tokens=False, return_token_type_ids=False, return_attention_mask=False, return_tensors="np")
-        dataset = load_dataset(config.path, config.name, streaming=True, split=split)
+        tokenize = functools.partial(self.tokenizer, padding=False, truncation=False, max_length=None,
+                                     add_special_tokens=False, return_token_type_ids=False, return_attention_mask=False, return_tensors="np")
+        dataset = load_dataset(config.path, config.name,
+                               streaming=True, split=split)
         dataset = dataset.shuffle(seed=config.seed)
-        tokenized = dataset.select_columns(["text"]).map(tokenize, input_columns=['text'], remove_columns=["text"])
-        dataloader = DataLoader(tokenized, num_workers=config.num_workers, collate_fn=self.collate, drop_last=True, batch_size=config.sequences_packed_per_batch)
+        selected_col = "text" if "text" in dataset.column_names else "content"
+        tokenized = dataset.select_columns([selected_col]).map(
+            tokenize, input_columns=[selected_col], remove_columns=[selected_col])
+        dataloader = DataLoader(tokenized, num_workers=config.num_workers, collate_fn=self.collate,
+                                drop_last=True, batch_size=config.sequences_packed_per_batch)
         self.iterator = iter(dataloader)
 
     def collate(self, sequences):
         flat_batch = onp.zeros(self.batch_size * self.max_seq_len, onp.uint32)
-        flat_is_start = onp.zeros(self.batch_size * self.max_seq_len, onp.bool_)
+        flat_is_start = onp.zeros(
+            self.batch_size * self.max_seq_len, onp.bool_)
         start = 0
         for seq in sequences:
             seq = seq['input_ids'][0]
@@ -322,12 +355,16 @@ class HuggingFaceDataLoader:
     def load(self, step):
         shape = (self.batch_size, self.max_seq_len)
         batch, is_start = next(self.iterator)
+
         def get_shard(x: jax.Array, indexing: Tuple[slice]) -> jax.Array:
             shard = x[indexing]
             return shard
-        tokens = jax.make_array_from_callback(shape, self.sharding, functools.partial(get_shard, batch))
-        is_start = jax.make_array_from_callback(shape, self.sharding, functools.partial(get_shard, is_start))
+        tokens = jax.make_array_from_callback(
+            shape, self.sharding, functools.partial(get_shard, batch))
+        is_start = jax.make_array_from_callback(
+            shape, self.sharding, functools.partial(get_shard, is_start))
         return TokenBatch(tokens, is_start)
+
 
 def get_loader(split: str, config: Union[FlatTokensParams, HuggingFaceDataParams], token_batch_params: TokenBatchParams):
     if isinstance(config, FlatTokensParams):

@@ -16,6 +16,7 @@ training:
   learning_rate: 3.0e-2
   tokens:
     batch: 256
+  use_grad_clip: true
 
 model:
   d_model: 128

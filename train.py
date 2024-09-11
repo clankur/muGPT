@@ -107,6 +107,13 @@ class Model:
 
         base = h.base
 
+        # TODO: load in a_l, b_l, c_l hyperparameters for each layer l
+        # 3 x 3 hyperparameter
+
+        # TODO: init Ws so that their std dev is d_model**(-*b_l)
+        # TODO: bake in parameter multiplier d_model**(-*a_l)
+        # reduces to d_model**(-*a_l - b_l)
+
         # scale for tensors with d_model fan_in and truncated normal truncated to (-2, 2)
         d_model_scale = 1 / (math.sqrt(h.d_model) * truncated_normal_stddev)
 
@@ -181,6 +188,9 @@ class Model:
             "V/t M/d -> V/t M", jnp.bfloat16(self.embed))
         x = shardops.index_unreduced("[V/t] M, B/d L -> B/d L M", embed, ids)
         x = shardops.psum_scatter("B/d L M -> B/d L M/t", x)
+
+        # TODO: scale x by d_model ** (-a_1)
+        # x = embed[ids] * (d_model ** (-a_1) )
 
         L = ids.shape[1]
         segment_ids = jnp.cumsum(is_seq_start, axis=1)
@@ -479,6 +489,9 @@ def training_step(
         global_norm = jnp.sqrt(global_norm_square)
 
         base = h.base
+
+        # TODO: investigate into do a a per layer learning rate scale
+        # modify below applying c to the lr_scales here
 
         lr_scales = Model(
             embed=1.0,

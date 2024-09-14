@@ -74,6 +74,19 @@ class Hparams:
     zero_queries: bool
     zero_unembed: bool
 
+    # param multipliers
+    a_embed: float
+    a_intermediate: float
+    a_unembed: float
+    # weight init std dev
+    b_embed: float
+    b_intermediate: float
+    b_unembed: float
+    # lr scale
+    c_embed: float
+    c_intermediate: float
+    c_unembed: float
+
 
 @pytree_dataclass
 class Model:
@@ -92,7 +105,17 @@ class Model:
     @staticmethod
     @typechecked
     def init(h: Hparams, rng: PRNGKey) -> "Model":
-        embed = jax.random.normal(
+        # The constant is stddev of standard normal truncated to (-2, 2)
+        truncated_normal_stddev = 0.87962566103423978
+
+        # scale for tensors with d_model fan_in and truncated normal truncated to (-2, 2)
+        d_model_scale = 1 / (math.sqrt(h.d_model) * truncated_normal_stddev)
+        h.b_intermediate = h.d_model ** (-h.b_intermediate)
+        # TODO: init Ws so that their std dev is d_model**(-b_l)
+        embed_scale = h.d_model ** (-h.b_embed)
+        unembed_scale = h.d_model ** (-h.b_unembed) * d_model_scale
+
+        embed = embed_scale * jax.random.normal(
             jax_extra.fold_in_str(rng, "embed"), (h.vocab, h.d_model), dtype=jnp.float32
         )
         # https://github.com/google/jax/issues/20390 for ones_like with sharding.
@@ -102,26 +125,13 @@ class Model:
 
         # All of wi/wq/wo/wo/w_kv use truncated_normal initializers with 'fan_in' scaling,
         # i.e. variance set to 1.0/fan_in.
-        # The constant is stddev of standard normal truncated to (-2, 2)
-        truncated_normal_stddev = 0.87962566103423978
-
-        base = h.base
-
-        # TODO: load in a_l, b_l, c_l hyperparameters for each layer l
-        # 3 x 3 hyperparameter
-
-        # TODO: init Ws so that their std dev is d_model**(-*b_l)
-        # TODO: bake in parameter multiplier d_model**(-*a_l)
-        # reduces to d_model**(-*a_l - b_l)
-
-        # scale for tensors with d_model fan_in and truncated normal truncated to (-2, 2)
-        d_model_scale = 1 / (math.sqrt(h.d_model) * truncated_normal_stddev)
-
-        w_kv_scale = d_model_scale
+        w_kv_scale = h.b_intermediate * d_model_scale
         total_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
-        w_o_scale = 1 / (math.sqrt(total_head_dim) * truncated_normal_stddev)
-        w_up_scale = d_model_scale
-        w_down_scale = 1 / (math.sqrt(h.d_ff) * truncated_normal_stddev)
+        w_o_scale = h.b_intermediate / (math.sqrt(total_head_dim) *
+                                        truncated_normal_stddev)
+        w_up_scale = h.b_intermediate * d_model_scale
+        w_down_scale = h.b_intermediate / (math.sqrt(h.d_ff) *
+                                           truncated_normal_stddev)
         w_kv_shape = (h.layers, 2, h.d_model, h.n_kv, h.d_head)
         w_kv = w_kv_scale * jax.random.truncated_normal(
             fold_in_str(rng, "w_kv"), -2, 2, w_kv_shape, dtype=jnp.float32
@@ -138,9 +148,8 @@ class Model:
             fold_in_str(rng, "w_down"), -2, 2, ff_shape, dtype=jnp.float32
         )
 
-        w_q_scale = d_model_scale
+        w_q_scale = h.b_intermediate * d_model_scale
         w_q_shape = (h.layers, h.d_model, h.n_q_per_kv, h.n_kv, h.d_head)
-        unembed_scale = d_model_scale
         w_o_shape = w_q_shape
         w_o = w_o_scale * jax.random.truncated_normal(
             fold_in_str(rng, "w_o"), -2, 2, w_o_shape, dtype=jnp.float32
@@ -179,14 +188,15 @@ class Model:
         shardings = make_shardings(Model)
         return jax.tree.map(lax.with_sharding_constraint, arrays, shardings)
 
-    @typechecked
+    @ typechecked
     def forward_pass(
         self, h: Hparams, ids: u32[b"B/d L"], is_seq_start: bool_[b"B/d L"]
     ) -> f32[b"B/d L V/t"]:
         # Initial embedding lookup.
         embed = shardops.all_gather(
             "V/t M/d -> V/t M", jnp.bfloat16(self.embed))
-        x = shardops.index_unreduced("[V/t] M, B/d L -> B/d L M", embed, ids)
+        x = (h.d_model ** -h.a_embed) * \
+            shardops.index_unreduced("[V/t] M, B/d L -> B/d L M", embed, ids)
         x = shardops.psum_scatter("B/d L M -> B/d L M/t", x)
 
         # TODO: scale x by d_model ** (-a_1)
@@ -209,12 +219,14 @@ class Model:
         rope_table = RopeTable.create(L, h)
 
         # Transformer blocks.
-        @explicit_activation_checkpointing
-        @typechecked
+        @ explicit_activation_checkpointing
+        @ typechecked
         def loop_body(
             x: bf16[b"B/d L M/t"], layer_weights: Any
         ) -> Tuple[bf16[b"B/d L M/t"], Tuple[()]]:
             w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2 = layer_weights
+
+            param_multiplier = h.d_model ** -h.a_intermediate
 
             # Pre-attention RMSNorm
             ln1 = shardops.all_gather("M/t/d -> M", jnp.float32(ln1))
@@ -224,7 +236,7 @@ class Model:
             # Attention, using Grouped Query Attention and RoPE position embeddings.
             w_q = shardops.all_gather(
                 "M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_q))
-            q = save_for_backward(
+            q = param_multiplier * save_for_backward(
                 shardops.einsum_unreduced(
                     "B/d L M, M Q K/t D -> B/d L Q K/t D", nx, w_q
                 )
@@ -232,7 +244,7 @@ class Model:
             q = rope_table.apply("L D -> 1 L 1 1 D", q)
             w_kv = shardops.all_gather(
                 "2 M/d K/t D -> 2 M K/t D", jnp.bfloat16(w_kv))
-            k, v = shardops.einsum_unreduced(
+            k, v = param_multiplier * shardops.einsum_unreduced(
                 "B/d L M, k_v M K/t D -> k_v B/d L K/t D", nx, w_kv
             )
             k = save_for_backward(k)
@@ -253,7 +265,7 @@ class Model:
             )
             w_o = shardops.all_gather(
                 "M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_o))
-            attn_out = shardops.einsum_unreduced(
+            attn_out = param_multiplier * shardops.einsum_unreduced(
                 "B/d Qlen Q K/t D, M Q K/t D -> B/d Qlen M", attn_out, w_o
             )
             attn_out = shardops.psum_scatter(
@@ -270,18 +282,20 @@ class Model:
             w_gate = shardops.all_gather(
                 "M/d F/t -> M F/t", jnp.bfloat16(w_gate))
             gate_proj = save_for_backward(
+                param_multiplier *
                 shardops.einsum_unreduced(
                     "B/d L M, M F/t -> B/d L F/t", nx, w_gate)
             )
             w_up = shardops.all_gather("M/d F/t -> M F/t", jnp.bfloat16(w_up))
             up_proj = save_for_backward(
+                param_multiplier *
                 shardops.einsum_unreduced(
                     "B/d L M, M F/t -> B/d L F/t", nx, w_up)
             )
             y = jax.nn.swish(gate_proj) * up_proj
             w_down = shardops.all_gather(
                 "M/d F/t -> M F/t", jnp.bfloat16(w_down))
-            ffn_out = shardops.einsum_unreduced(
+            ffn_out = param_multiplier * shardops.einsum_unreduced(
                 "B/d L F/t, M F/t -> B/d L M", y, w_down
             )
             ffn_out = shardops.psum_scatter("B/d L M -> B/d L M/t", ffn_out)
@@ -312,7 +326,7 @@ class Model:
         unembed = unembed_scale * shardops.all_gather(
             "V/t M/d -> V/t M", jnp.bfloat16(self.unembed)
         )
-        logits = shardops.einsum_unreduced(
+        logits = (h.d_model ** -h.a_unembed) * shardops.einsum_unreduced(
             "B/d L M, V/t M -> B/d L V/t",
             x,
             unembed,
@@ -321,7 +335,7 @@ class Model:
 
         return logits
 
-    @typechecked
+    @ typechecked
     def loss(self, h: Hparams, batch: TokenBatch) -> f32[b""]:
         # Given sequence-packed targets:
         #   [[1, 2], [3, 4, 5], [6, 7, 8, 9]]
@@ -354,12 +368,12 @@ class Model:
         return -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch)
 
 
-@pytree_dataclass
+@ pytree_dataclass
 class RopeTable:
     sin: f32["len d_head2"]
     cos: f32["len d_head2"]
 
-    @staticmethod
+    @ staticmethod
     def create(max_len: int, hparams: Hparams) -> "RopeTable":
         rope_max_timescale = hparams.rope_max_timescale
         d_head = hparams.d_head
@@ -384,7 +398,7 @@ class RopeTable:
         return jnp.append(r1, r2, axis=-1)
 
 
-@typechecked
+@ typechecked
 def rms_norm(x: bf16[b"batch/d len M"]) -> bf16[b"batch/d len M"]:
     mean2 = save_for_backward(
         jnp.mean(jax.lax.square(jnp.float32(x)), axis=-1, keepdims=True)
@@ -392,7 +406,7 @@ def rms_norm(x: bf16[b"batch/d len M"]) -> bf16[b"batch/d len M"]:
     return jnp.bfloat16(x * jax.lax.rsqrt(mean2 + 1e-6))
 
 
-@pytree_dataclass
+@ pytree_dataclass
 class Metrics:
     loss: f32[b""]
     learning_rate: f32[b""]
@@ -400,7 +414,7 @@ class Metrics:
     raw_grad_norm: f32[b""]
 
 
-@dataclass(frozen=True)
+@ dataclass(frozen=True)
 class TrainingHparams:
     adam_b1: float
     adam_b2: float
@@ -418,13 +432,13 @@ class TrainingHparams:
     use_grad_clip: bool = True
 
 
-@pytree_dataclass
+@ pytree_dataclass
 class State:
     weights: Model
     adam_mu: Model
     adam_nu: Model
 
-    @staticmethod
+    @ staticmethod
     def init(hparams: Hparams, rng: PRNGKey) -> "State":
         weights = Model.init(hparams, rng)
         adam_mu = jax.tree.map(lambda p: p * 0.0, weights)
@@ -432,7 +446,7 @@ class State:
         return State(weights=weights, adam_mu=adam_mu, adam_nu=adam_nu)
 
 
-@partial(jax.jit, static_argnums=(2, 3), donate_argnums=(0,))
+@ partial(jax.jit, static_argnums=(2, 3), donate_argnums=(0,))
 def training_step(
     state: State,
     step: u32[b""],
@@ -440,7 +454,7 @@ def training_step(
     hparams: TrainingHparams,
     batch: TokenBatch,
 ) -> Tuple[Any, Metrics]:
-    @partial(
+    @ partial(
         shardtypes.typed_shard_map, check_rep=False
     )  # check_rep=False for https://github.com/google/jax/issues/20335
     def sharded_step(
@@ -492,19 +506,22 @@ def training_step(
 
         # TODO: investigate into do a a per layer learning rate scale
         # modify below applying c to the lr_scales here
+        embed_lr_scale = h.d_model ** -h.c_embed
+        intermediate_lr_scale = h.d_model ** -h.c_intermediate
+        unembed_lr_scale = h.d_model ** -h.c_unembed
 
         lr_scales = Model(
-            embed=1.0,
-            unembed=1.0,
+            embed=embed_lr_scale,
+            unembed=unembed_lr_scale,
             ln1=1.0,
             ln2=1.0,
-            w_q=h.d_model / base.d_model,
-            w_kv=h.d_model / base.d_model,
+            w_q=h.d_model / base.d_model * intermediate_lr_scale,
+            w_kv=h.d_model / base.d_model * intermediate_lr_scale,
             w_o=(h.d_head * h.n_kv * h.n_q_per_kv)
-            / (base.d_head * base.n_kv * base.n_q_per_kv),
-            w_gate=h.d_model / base.d_model,
-            w_up=h.d_model / base.d_model,
-            w_down=h.d_ff / base.d_ff,
+            / (base.d_head * base.n_kv * base.n_q_per_kv) * intermediate_lr_scale,
+            w_gate=h.d_model / base.d_model * intermediate_lr_scale,
+            w_up=h.d_model / base.d_model * intermediate_lr_scale,
+            w_down=h.d_ff / base.d_ff * intermediate_lr_scale,
             final_layer_norm=1.0,
         )
 
@@ -538,8 +555,11 @@ def training_step(
             completed_steps = step + 1
             mu_hat = mu / (1 - jnp.float32(hparams.adam_b1) ** completed_steps)
             nu_hat = nu / (1 - jnp.float32(hparams.adam_b2) ** completed_steps)
-            g = mu_hat / \
-                (jnp.sqrt(nu_hat + hparams.adam_eps_root) + hparams.adam_eps)
+            # as per C.5. in https://arxiv.org/pdf2407.05872
+            # they mention introducing hp a, b to below function,
+            # TODO: test and see if a = b = something besides 1
+            g = jnp.arctan2(mu_hat, jnp.sqrt(nu_hat))
+
             # Weight decay
             g += hparams.weight_decay * p
             # Learning rate
@@ -566,19 +586,19 @@ def training_step(
     return sharded_step(state, step, batch)
 
 
-@dataclass(frozen=True)
+@ dataclass(frozen=True)
 class Paths:
     root_working_dir: str
     model_name: Optional[str]
 
 
-@dataclass(frozen=True)
+@ dataclass(frozen=True)
 class MeshConfig:
     d: int
     t: int
 
 
-@dataclass(frozen=True)
+@ dataclass(frozen=True)
 class Config:
     model: Hparams
     training: TrainingHparams
@@ -598,7 +618,7 @@ class Config:
             self.flat_tokens is not None and self.hf_dataset is not None
         ), "Should not specify both flat_tokens and hf_dataset."
 
-    @cached_property
+    @ cached_property
     def training_data(self) -> Union[FlatTokensParams, HuggingFaceDataParams]:
         return self.flat_tokens or self.hf_dataset
 
@@ -736,7 +756,7 @@ def get_model_name(config_name: str):
     return f"{config_name}_{overrides}" if overrides else config_name
 
 
-@hydra.main(config_path="configs", version_base=None)
+@ hydra.main(config_path="configs", version_base=None)
 def main(config):
     config = jax_extra.make_dataclass_from_dict(Config, config)
     if config.training.queue:

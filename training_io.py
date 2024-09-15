@@ -58,7 +58,7 @@ def log(step: int, logger: Logger, output: PyTree):
       else:
         raise ValueError(f"Output {path} has unsupported shape {arr.shape} and dtype {arr.dtype}.")
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{now}] Step {step}: {metrics_dict}")
+    # print(f"[{now}] Step {step}: {metrics_dict}")
 
 
 def load_checkpoint_if_it_exists(checkpoint_dir: str, state: PyTree, config: IOConfig) -> Tuple[PyTree, int]:

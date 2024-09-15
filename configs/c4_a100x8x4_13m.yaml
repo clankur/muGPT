@@ -38,5 +38,4 @@ model:
     d_ff: 1024 
   parameterization: "sp" 
 
-
 checkpoint_interval: 9200

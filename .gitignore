@@ -163,3 +163,4 @@ cython_debug/
 #.idea/
 test.py
 configs/c4_v4-32_arxiv_base.yaml
+.vscode

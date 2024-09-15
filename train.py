@@ -1,5 +1,6 @@
 """Main training loop, including the model, loss function, and optimizer."""
 
+from collections import namedtuple
 from jax.tree_util import tree_leaves
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
@@ -73,19 +74,66 @@ class Hparams:
     a_output: float
     zero_queries: bool
     zero_unembed: bool
+    parameterization: str
 
-    # param multipliers
-    a_embed: float
-    a_intermediate: float
-    a_unembed: float
-    # weight init std dev
-    b_embed: float
-    b_intermediate: float
-    b_unembed: float
-    # lr scale
-    c_embed: float
-    c_intermediate: float
-    c_unembed: float
+
+def get_parameterization(style: str):
+    Parameterization = namedtuple('Parameterization', [
+        'embed_init_var', 'embed_param_mult', 'embed_grad',
+        'hidden_init_var', 'hidden_param_mult', 'hidden_grad',
+        'unembed_init_var', 'unembed_param_mult', 'unembed_grad'
+    ])
+
+    if style.lower() == 'sp':
+        return Parameterization(
+            embed_init_var=0,
+            embed_param_mult=0,
+            embed_grad=1/2,
+            hidden_init_var=1,
+            hidden_param_mult=0,
+            hidden_grad=1/2,
+            unembed_init_var=1,
+            unembed_param_mult=0,
+            unembed_grad=0
+        )
+    elif style.lower() == 'mup':
+        return Parameterization(
+            embed_init_var=1,
+            embed_param_mult=1/2,
+            embed_grad=1/2,
+            hidden_init_var=1,
+            hidden_param_mult=0,
+            hidden_grad=1,
+            unembed_init_var=1,
+            unembed_param_mult=1/2,
+            unembed_grad=1/2
+        )
+    elif style.lower() == 'ntk':
+        return Parameterization(
+            embed_init_var=0,
+            embed_param_mult=0,
+            embed_grad=1/2,
+            hidden_init_var=0,
+            hidden_param_mult=1/2,
+            hidden_grad=1,
+            unembed_init_var=0,
+            unembed_param_mult=1/2,
+            unembed_grad=1/2
+        )
+    elif style.lower() == 'mean-field':
+        return Parameterization(
+            embed_init_var=0,
+            embed_param_mult=0,
+            embed_grad=1,
+            hidden_init_var=0,
+            hidden_param_mult=1/2,
+            hidden_grad=3/2,
+            unembed_init_var=0,
+            unembed_param_mult=1,
+            unembed_grad=1
+        )
+    else:
+        raise ValueError(f"Unknown parameterization style: {style}")
 
 
 @pytree_dataclass
@@ -107,13 +155,14 @@ class Model:
     def init(h: Hparams, rng: PRNGKey) -> "Model":
         # The constant is stddev of standard normal truncated to (-2, 2)
         truncated_normal_stddev = 0.87962566103423978
+        p = get_parameterization(h.parameterization)
 
         # scale for tensors with d_model fan_in and truncated normal truncated to (-2, 2)
         d_model_scale = 1 / (math.sqrt(h.d_model) * truncated_normal_stddev)
-        h.b_intermediate = h.d_model ** (-h.b_intermediate)
-        # TODO: init Ws so that their std dev is d_model**(-b_l)
-        embed_scale = h.d_model ** (-h.b_embed)
-        unembed_scale = h.d_model ** (-h.b_unembed) * d_model_scale
+
+        hidden_init_var = h.d_model ** (-p.hidden_init_var)
+        embed_scale = h.d_model ** (-p.embed_init_var)
+        unembed_scale = h.d_model ** (-p.unembed_init_var) * d_model_scale
 
         embed = embed_scale * jax.random.normal(
             jax_extra.fold_in_str(rng, "embed"), (h.vocab, h.d_model), dtype=jnp.float32
@@ -125,13 +174,13 @@ class Model:
 
         # All of wi/wq/wo/wo/w_kv use truncated_normal initializers with 'fan_in' scaling,
         # i.e. variance set to 1.0/fan_in.
-        w_kv_scale = h.b_intermediate * d_model_scale
+        w_kv_scale = hidden_init_var * d_model_scale
         total_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
-        w_o_scale = h.b_intermediate / (math.sqrt(total_head_dim) *
-                                        truncated_normal_stddev)
-        w_up_scale = h.b_intermediate * d_model_scale
-        w_down_scale = h.b_intermediate / (math.sqrt(h.d_ff) *
-                                           truncated_normal_stddev)
+        w_o_scale = hidden_init_var / (math.sqrt(total_head_dim) *
+                                       truncated_normal_stddev)
+        w_up_scale = hidden_init_var * d_model_scale
+        w_down_scale = hidden_init_var / (math.sqrt(h.d_ff) *
+                                          truncated_normal_stddev)
         w_kv_shape = (h.layers, 2, h.d_model, h.n_kv, h.d_head)
         w_kv = w_kv_scale * jax.random.truncated_normal(
             fold_in_str(rng, "w_kv"), -2, 2, w_kv_shape, dtype=jnp.float32
@@ -192,10 +241,11 @@ class Model:
     def forward_pass(
         self, h: Hparams, ids: u32[b"B/d L"], is_seq_start: bool_[b"B/d L"]
     ) -> f32[b"B/d L V/t"]:
+        p = get_parameterization(h.parameterization)
         # Initial embedding lookup.
         embed = shardops.all_gather(
             "V/t M/d -> V/t M", jnp.bfloat16(self.embed))
-        x = (h.d_model ** -h.a_embed) * \
+        x = (h.d_model ** -p.embed_param_mult) * \
             shardops.index_unreduced("[V/t] M, B/d L -> B/d L M", embed, ids)
         x = shardops.psum_scatter("B/d L M -> B/d L M/t", x)
 
@@ -226,7 +276,7 @@ class Model:
         ) -> Tuple[bf16[b"B/d L M/t"], Tuple[()]]:
             w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2 = layer_weights
 
-            param_multiplier = h.d_model ** -h.a_intermediate
+            param_multiplier = h.d_model ** -p.hidden_param_mult
 
             # Pre-attention RMSNorm
             ln1 = shardops.all_gather("M/t/d -> M", jnp.float32(ln1))
@@ -326,7 +376,7 @@ class Model:
         unembed = unembed_scale * shardops.all_gather(
             "V/t M/d -> V/t M", jnp.bfloat16(self.unembed)
         )
-        logits = (h.d_model ** -h.a_unembed) * shardops.einsum_unreduced(
+        logits = (h.d_model ** -p.unembed_param_mult) * shardops.einsum_unreduced(
             "B/d L M, V/t M -> B/d L V/t",
             x,
             unembed,
@@ -504,11 +554,10 @@ def training_step(
 
         base = h.base
 
-        # TODO: investigate into do a a per layer learning rate scale
-        # modify below applying c to the lr_scales here
-        embed_lr_scale = h.d_model ** -h.c_embed
-        intermediate_lr_scale = h.d_model ** -h.c_intermediate
-        unembed_lr_scale = h.d_model ** -h.c_unembed
+        p = get_parameterization(h.parameterization)
+        embed_lr_scale = h.d_model ** -p.embed_grad
+        intermediate_lr_scale = h.d_model ** -p.hidden_grad
+        unembed_lr_scale = h.d_model ** -p.unembed_grad
 
         lr_scales = Model(
             embed=embed_lr_scale,

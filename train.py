@@ -197,7 +197,7 @@ class Model:
             fold_in_str(rng, "w_down"), -2, 2, ff_shape, dtype=jnp.float32
         )
 
-        w_q_scale = h.b_intermediate * d_model_scale
+        w_q_scale = hidden_init_var * d_model_scale
         w_q_shape = (h.layers, h.d_model, h.n_q_per_kv, h.n_kv, h.d_head)
         w_o_shape = w_q_shape
         w_o = w_o_scale * jax.random.truncated_normal(

@@ -160,9 +160,10 @@ class Model:
         # scale for tensors with d_model fan_in and truncated normal truncated to (-2, 2)
         d_model_scale = 1 / (math.sqrt(h.d_model) * truncated_normal_stddev)
 
-        hidden_init_var = h.d_model ** (-p.hidden_init_var)
-        embed_scale = h.d_model ** (-p.embed_init_var)
-        unembed_scale = h.d_model ** (-p.unembed_init_var) * d_model_scale
+        hidden_init_var = (h.d_model / h.base.d_model) ** (-p.hidden_init_var)
+        embed_scale = (h.d_model / h.base.d_model) ** (-p.embed_init_var)
+        unembed_scale = (
+            h.d_model / h.base.d_model) ** (-p.unembed_init_var) * d_model_scale
 
         embed = embed_scale * jax.random.normal(
             jax_extra.fold_in_str(rng, "embed"), (h.vocab, h.d_model), dtype=jnp.float32
@@ -245,12 +246,9 @@ class Model:
         # Initial embedding lookup.
         embed = shardops.all_gather(
             "V/t M/d -> V/t M", jnp.bfloat16(self.embed))
-        x = (h.d_model ** -p.embed_param_mult) * \
+        x = ((h.d_model / h.base.d_model) ** -p.embed_param_mult) * \
             shardops.index_unreduced("[V/t] M, B/d L -> B/d L M", embed, ids)
         x = shardops.psum_scatter("B/d L M -> B/d L M/t", x)
-
-        # TODO: scale x by d_model ** (-a_1)
-        # x = embed[ids] * (d_model ** (-a_1) )
 
         L = ids.shape[1]
         segment_ids = jnp.cumsum(is_seq_start, axis=1)
@@ -268,7 +266,9 @@ class Model:
 
         rope_table = RopeTable.create(L, h)
 
+        param_multiplier = (h.d_model / h.base.d_model) ** -p.hidden_param_mult
         # Transformer blocks.
+
         @ explicit_activation_checkpointing
         @ typechecked
         def loop_body(
@@ -276,8 +276,7 @@ class Model:
         ) -> Tuple[bf16[b"B/d L M/t"], Tuple[()]]:
             w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2 = layer_weights
 
-            param_multiplier = h.d_model ** -p.hidden_param_mult
-
+            # param_multiplier = 1
             # Pre-attention RMSNorm
             ln1 = shardops.all_gather("M/t/d -> M", jnp.float32(ln1))
             gx = shardops.all_gather("B/d L M/t -> B/d L M", x)
@@ -376,7 +375,7 @@ class Model:
         unembed = unembed_scale * shardops.all_gather(
             "V/t M/d -> V/t M", jnp.bfloat16(self.unembed)
         )
-        logits = (h.d_model ** -p.unembed_param_mult) * shardops.einsum_unreduced(
+        logits = ((h.d_model / h.base.d_model) ** -p.unembed_param_mult) * shardops.einsum_unreduced(
             "B/d L M, V/t M -> B/d L V/t",
             x,
             unembed,
@@ -555,9 +554,9 @@ def training_step(
         base = h.base
 
         p = get_parameterization(h.parameterization)
-        embed_lr_scale = h.d_model ** -p.embed_grad
-        intermediate_lr_scale = h.d_model ** -p.hidden_grad
-        unembed_lr_scale = h.d_model ** -p.unembed_grad
+        embed_lr_scale = (h.d_model / base.d_model) ** -p.embed_grad
+        intermediate_lr_scale = (h.d_model / base.d_model) ** -p.hidden_grad
+        unembed_lr_scale = (h.d_model / base.d_model) ** -p.unembed_grad
 
         lr_scales = Model(
             embed=embed_lr_scale,

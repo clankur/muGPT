@@ -159,18 +159,23 @@ class Model:
         # The constant is stddev of standard normal truncated to (-2, 2)
         truncated_normal_stddev = 0.87962566103423978
         p = get_parameterization(h.parameterization)
+        base = h.base
 
-        # scale for tensors with d_model fan_in and truncated normal truncated to (-2, 2)
-        d_model_scale = 1 / (math.sqrt(h.d_model) * truncated_normal_stddev)
-
-        hidden_init_var = (h.d_model / h.base.d_model) ** (-p.hidden_init_var)
-        embed_scale = (h.d_model / h.base.d_model) ** (-p.embed_init_var)
-        unembed_scale = (
-            h.d_model / h.base.d_model) ** (-p.unembed_init_var) * d_model_scale
+        # scale for tensors with fan_in and truncated normal truncated to (-2, 2) 
+        d_model_scale = (h.d_model ** 2 / h.base.d_model) ** (-0.5 * p.hidden_init_var) * truncated_normal_stddev
+        embed_scale = (h.d_model ** 2 / h.base.d_model) ** (-0.5 *p.embed_init_var) * truncated_normal_stddev
+        unembed_scale = (h.d_model ** 2 / h.base.d_model) ** (-0.5 * p.unembed_init_var) * truncated_normal_stddev 
+        d_ff_scale = (h.d_ff ** 2 / h.base.d_ff ) ** (-0.5 * p.hidden_init_var) * truncated_normal_stddev
+        # theoretically total_head_dim = d_model
+        total_head_dim = h.n_q_per_kv * h.n_kv * h.d_head 
+        base_head_dim = base.n_q_per_kv * base.n_kv * base.d_head
+        total_head_dim_scale =  (total_head_dim ** 2 / base_head_dim )** (-0.5 * p.hidden_init_var) * truncated_normal_stddev
 
         embed = embed_scale * jax.random.normal(
             jax_extra.fold_in_str(rng, "embed"), (h.vocab, h.d_model), dtype=jnp.float32
         )
+
+
         # https://github.com/google/jax/issues/20390 for ones_like with sharding.
         ln1 = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
         ln2 = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
@@ -178,13 +183,10 @@ class Model:
 
         # All of wi/wq/wo/wo/w_kv use truncated_normal initializers with 'fan_in' scaling,
         # i.e. variance set to 1.0/fan_in.
-        w_kv_scale = hidden_init_var * d_model_scale
-        total_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
-        w_o_scale = hidden_init_var / (math.sqrt(total_head_dim) *
-                                       truncated_normal_stddev)
-        w_up_scale = hidden_init_var * d_model_scale
-        w_down_scale = hidden_init_var / (math.sqrt(h.d_ff) *
-                                          truncated_normal_stddev)
+        w_kv_scale = d_model_scale
+        w_up_scale = d_model_scale
+
+        w_down_scale = d_ff_scale
         w_kv_shape = (h.layers, 2, h.d_model, h.n_kv, h.d_head)
         w_kv = w_kv_scale * jax.random.truncated_normal(
             fold_in_str(rng, "w_kv"), -2, 2, w_kv_shape, dtype=jnp.float32
@@ -201,8 +203,10 @@ class Model:
             fold_in_str(rng, "w_down"), -2, 2, ff_shape, dtype=jnp.float32
         )
 
-        w_q_scale = hidden_init_var * d_model_scale
+        w_q_scale = d_model_scale
         w_q_shape = (h.layers, h.d_model, h.n_q_per_kv, h.n_kv, h.d_head)
+
+        w_o_scale = total_head_dim_scale
         w_o_shape = w_q_shape
         w_o = w_o_scale * jax.random.truncated_normal(
             fold_in_str(rng, "w_o"), -2, 2, w_o_shape, dtype=jnp.float32

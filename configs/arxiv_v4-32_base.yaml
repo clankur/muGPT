@@ -21,7 +21,8 @@ training:
   cosine_learning_rate_final_fraction: 0.1
   use_grad_clip: true
 
-
+# overwrite filespec with:
+# python -m train --config-name=config_name flat_tokens.filespec="gcs:/dataset"
 flat_tokens:
   filespec: ''
   streams: 1

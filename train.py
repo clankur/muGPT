@@ -75,6 +75,9 @@ class Hparams:
     zero_queries: bool
     zero_unembed: bool
     parameterization: str
+    gamma_embed: float
+    gamma_hidden: float
+    gamma_unembed: float
 
 
 def get_parameterization(style: str):
@@ -554,22 +557,25 @@ def training_step(
         base = h.base
 
         p = get_parameterization(h.parameterization)
-        embed_lr_scale = (h.d_model / base.d_model) ** -p.embed_grad
-        intermediate_lr_scale = (h.d_model / base.d_model) ** -p.hidden_grad
-        unembed_lr_scale = (h.d_model / base.d_model) ** -p.unembed_grad
+        embed_lr_scale = h.gamma_embed * \
+            (h.d_model / base.d_model) ** -p.embed_grad
+        hidden_lr_scale = h.gamma_hidden * \
+            (h.d_model / base.d_model) ** -p.hidden_grad
+        unembed_lr_scale = h.gamma_unembed * \
+            (h.d_model / base.d_model) ** -p.unembed_grad
 
         lr_scales = Model(
             embed=embed_lr_scale,
             unembed=unembed_lr_scale,
             ln1=1.0,
             ln2=1.0,
-            w_q=h.d_model / base.d_model * intermediate_lr_scale,
-            w_kv=h.d_model / base.d_model * intermediate_lr_scale,
+            w_q=h.d_model / base.d_model * hidden_lr_scale,
+            w_kv=h.d_model / base.d_model * hidden_lr_scale,
             w_o=(h.d_head * h.n_kv * h.n_q_per_kv)
-            / (base.d_head * base.n_kv * base.n_q_per_kv) * intermediate_lr_scale,
-            w_gate=h.d_model / base.d_model * intermediate_lr_scale,
-            w_up=h.d_model / base.d_model * intermediate_lr_scale,
-            w_down=h.d_ff / base.d_ff * intermediate_lr_scale,
+            / (base.d_head * base.n_kv * base.n_q_per_kv) * hidden_lr_scale,
+            w_gate=h.d_model / base.d_model * hidden_lr_scale,
+            w_up=h.d_model / base.d_model * hidden_lr_scale,
+            w_down=h.d_ff / base.d_ff * hidden_lr_scale,
             final_layer_norm=1.0,
         )
 

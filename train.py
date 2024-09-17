@@ -161,20 +161,24 @@ class Model:
         p = get_parameterization(h.parameterization)
         base = h.base
 
-        # scale for tensors with fan_in and truncated normal truncated to (-2, 2) 
-        d_model_scale = (h.d_model ** 2 / h.base.d_model) ** (-0.5 * p.hidden_init_var) * truncated_normal_stddev
-        embed_scale = (h.d_model ** 2 / h.base.d_model) ** (-0.5 *p.embed_init_var) * truncated_normal_stddev
-        unembed_scale = (h.d_model ** 2 / h.base.d_model) ** (-0.5 * p.unembed_init_var) * truncated_normal_stddev 
-        d_ff_scale = (h.d_ff ** 2 / h.base.d_ff ) ** (-0.5 * p.hidden_init_var) * truncated_normal_stddev
+        # scale for tensors with fan_in and truncated normal truncated to (-2, 2)
+        d_model_scale = (h.d_model ** 2 / base.d_model) ** (-0.5 *
+                                                            p.hidden_init_var) * truncated_normal_stddev
+        embed_scale = (h.d_model ** 2 / base.d_model) ** (-0.5 *
+                                                          p.embed_init_var) * truncated_normal_stddev
+        unembed_scale = (h.d_model ** 2 / base.d_model) ** (-0.5 *
+                                                            p.unembed_init_var) * truncated_normal_stddev
+        d_ff_scale = (h.d_ff ** 2 / base.d_ff) ** (-0.5 *
+                                                   p.hidden_init_var) * truncated_normal_stddev
         # theoretically total_head_dim = d_model
-        total_head_dim = h.n_q_per_kv * h.n_kv * h.d_head 
+        total_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
         base_head_dim = base.n_q_per_kv * base.n_kv * base.d_head
-        total_head_dim_scale =  (total_head_dim ** 2 / base_head_dim )** (-0.5 * p.hidden_init_var) * truncated_normal_stddev
+        total_head_dim_scale = (
+            total_head_dim ** 2 / base_head_dim) ** (-0.5 * p.hidden_init_var) * truncated_normal_stddev
 
         embed = embed_scale * jax.random.normal(
             jax_extra.fold_in_str(rng, "embed"), (h.vocab, h.d_model), dtype=jnp.float32
         )
-
 
         # https://github.com/google/jax/issues/20390 for ones_like with sharding.
         ln1 = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)

@@ -99,23 +99,23 @@ def main(config):
     if not config.training.queue:
         raise ValueError("Training queue must be specified")
 
-    def run_base_task(queue):
-        base_task_id = create_base_task(config)
-        queue.put(base_task_id)
+    # def run_base_task(queue):
+    #     base_task_id = create_base_task(config)
+    #     queue.put(base_task_id)
 
     # Create a queue to get the result from the subprocess
-    result_queue = multiprocessing.Queue()
+    # result_queue = multiprocessing.Queue()
 
-    # Start the base task creation in a separate process
-    process = multiprocessing.Process(
-        target=run_base_task, args=(result_queue))
-    process.start()
+    # # Start the base task creation in a separate process
+    # process = multiprocessing.Process(
+    #     target=run_base_task, args=(result_queue))
+    # process.start()
 
-    # Wait for the base task ID
-    base_task_id = result_queue.get()
-    process.join()
+    # # Wait for the base task ID
+    # base_task_id = result_queue.get()
+    # process.join()
 
-    # base_task_id = "3383f19511eb4345aafca9c0b97cd12d"
+    base_task_id = "06feeff5fdd44cb7845ed9b4f3a0a1b9"
     print(base_task_id)
     config_name = hydra.core.hydra_config.HydraConfig.get()[
         "job"]["config_name"]

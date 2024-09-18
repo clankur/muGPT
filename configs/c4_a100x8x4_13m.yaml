@@ -37,7 +37,8 @@ model:
     d_head: 32 
     d_ff: 1024 
   parameterization: "sp" 
-  gamma_embed: 5.357
-  gamma_hidden: 1.133
-  gamma_unembed: 2.596
+  gamma_embed: 0.24208930452006025 
+  gamma_hidden: 0.8381750357690096 
+  gamma_unembed: 0.40928648131713624 
+
 checkpoint_interval: 9200

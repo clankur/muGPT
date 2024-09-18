@@ -37,5 +37,8 @@ model:
     d_head: 64
     d_ff: 2048
   parameterization: "sp" 
+  gamma_embed: 1. 
+  gamma_hidden: 1.
+  gamma_unembed: 1.
 
 checkpoint_interval: 9200

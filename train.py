@@ -162,25 +162,24 @@ class Model:
         base = h.base
 
         # scale for tensors with fan_in and truncated normal truncated to (-2, 2)
-
-        d_model_scale = (math.sqrt(base.d_model) / h.d_model) ** (
+        d_model_scale = (math.sqrt(base.d_model) / (h.d_model * truncated_normal_stddev)) ** (
             p.hidden_init_var
-        ) * truncated_normal_stddev
-        embed_scale = (math.sqrt(base.d_model) / h.d_model) ** (
+        )
+        embed_scale = (math.sqrt(base.d_model) / (h.d_model * truncated_normal_stddev)) ** (
             p.embed_init_var
-        ) * truncated_normal_stddev
-        unembed_scale = (math.sqrt(base.d_model) / h.d_model) ** (
+        )
+        unembed_scale = (math.sqrt(base.d_model) / (h.d_model * truncated_normal_stddev)) ** (
             p.unembed_init_var
-        ) * truncated_normal_stddev
-        d_ff_scale = (math.sqrt(base.d_ff) / h.d_ff) ** (
+        )
+        d_ff_scale = (math.sqrt(base.d_ff) / (h.d_ff * truncated_normal_stddev)) ** (
             p.hidden_init_var
-        ) * truncated_normal_stddev
+        )
         # theoretically total_head_dim = d_model
         total_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
         base_head_dim = base.n_q_per_kv * base.n_kv * base.d_head
-        total_head_dim_scale = (math.sqrt(base_head_dim) / total_head_dim) ** (
+        total_head_dim_scale = (math.sqrt(base_head_dim) / (total_head_dim * truncated_normal_stddev)) ** (
             p.hidden_init_var
-        ) * truncated_normal_stddev
+        )
 
         embed = embed_scale * jax.random.normal(
             jax_extra.fold_in_str(rng, "embed"), (h.vocab, h.d_model), dtype=jnp.float32
@@ -293,7 +292,6 @@ class Model:
         ) -> Tuple[bf16[b"B/d L M/t"], Tuple[()]]:
             w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2 = layer_weights
 
-            # param_multiplier = 1
             # Pre-attention RMSNorm
             ln1 = shardops.all_gather("M/t/d -> M", jnp.float32(ln1))
             gx = shardops.all_gather("B/d L M/t -> B/d L M", x)
@@ -316,8 +314,12 @@ class Model:
             k = save_for_backward(k)
             v = save_for_backward(v)
             k = rope_table.apply("L d -> 1 L 1 d", k)
+            logit_scale = jax.lax.select(
+                h.parameterization.lower() == "mup",
+                h.a_attn * math.sqrt(h.base.d_head) / h.d_head,
+                1.0
+            )
 
-            logit_scale = h.a_attn * math.sqrt(h.base.d_head) / h.d_head
             logits = logit_scale * shardops.einsum_unreduced(
                 "B/d Qlen Q K/t D, B/d Klen K/t D -> B/d Qlen Klen Q K/t",
                 q,
@@ -388,7 +390,11 @@ class Model:
         ln = shardops.all_gather(
             "M/t/d -> M", jnp.float32(self.final_layer_norm))
         x = jnp.bfloat16(rms_norm(x) * ln)
-        unembed_scale = h.a_output * h.base.d_model / h.d_model
+        unembed_scale = jax.lax.select(
+            h.parameterization.lower() == "mup",
+            h.a_output * h.base.d_model / h.d_model,
+            1.0
+        )
         unembed = unembed_scale * shardops.all_gather(
             "V/t M/d -> V/t M", jnp.bfloat16(self.unembed)
         )

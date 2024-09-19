@@ -26,57 +26,14 @@ def create_optimizer(base_task_id: str, config: Config):
         ],
         objective_metric_title="loss",
         objective_metric_series="loss",
-        objective_metric_sign="min",
+        objective_metric_sign="min_global",
         optimizer_class=OptimizerOptuna,
         execution_queue=config.training.queue,
         max_number_of_concurrent_tasks=1,  # 100 in the paper
-        total_max_jobs=100,  # 800 in the paper
+        total_max_jobs=200,  # 800 in the paper
         min_iteration_per_job=1,
         max_iteration_per_job=config.training.steps,
     )
-
-
-def create_base_task(config: Config):
-    base_task_config = dataclasses.replace(
-        config, training=dataclasses.replace(config.training, steps=1)
-    )
-
-    config_name = hydra.core.hydra_config.HydraConfig.get()[
-        "job"]["config_name"]
-    task_name = (
-        config.paths.model_name
-        if config.paths.model_name
-        else get_model_name(config_name)
-    )
-    git_branch_name = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    ).stdout.strip()
-    task = Task.init(
-        project_name=f"{config_name}/{git_branch_name}", task_name=task_name
-    )
-    task.set_packages("requirements-tpu.txt")
-    task.add_tags([git_branch_name])
-    logger = task.get_logger()
-    task.execute_remotely(queue_name=config.training.queue)
-    task.launch_multi_node(
-        config.num_hosts, wait=True, queue=config.training.queue + "-workers"
-    )
-    jax.distributed.initialize(
-        os.environ["MASTER_ADDR"] + ":" + os.environ["MASTER_PORT"],
-        num_processes=int(os.environ["WORLD_SIZE"]),
-        process_id=int(os.environ["RANK"]),
-    )
-
-    if not training_io.is_device_0():
-        task.set_system_tags((task.get_system_tags() or []) + ["hidden"])
-    main_contained(base_task_config, logger)
-    task.close()
-    Task.set_model_config(config)
-    return task.id
 
 
 def job_complete_callback(
@@ -115,38 +72,33 @@ def main(config):
     # base_task_id = result_queue.get()
     # process.join()
 
-    base_task_id = "06feeff5fdd44cb7845ed9b4f3a0a1b9"
+    base_task_id = "59cadf6662194d4dac383dfd5cd3e099"
     print(base_task_id)
-    config_name = hydra.core.hydra_config.HydraConfig.get()[
-        "job"]["config_name"]
-    git_branch_name = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    Task.init(
-        project_name=f"{config_name}/{git_branch_name}/hpo",
-        task_name=f'hpo_{config_name}_gamma_sweep',
+    base_task: Task = Task.get_task(base_task_id)
+    project_name, task_name = base_task.get_project_name(), base_task.name
+
+    print(project_name, task_name)
+
+    task: Task = Task.init(
+        project_name=f"{project_name}/hpo",
+        task_name=f'hpo_{task_name}_gamma_sweep',
         task_type=Task.TaskTypes.optimizer,
         reuse_last_task_id=False
     )
 
     optim = create_optimizer(base_task_id, config)
-    # report every 12 seconds, this is way too often, but we are testing here
+    # report every 12 mins
     optim.set_report_period(12)
     # start the optimization process, callback function to be called every time an experiment is completed
     # this function returns immediately
     optim.start(job_complete_callback=job_complete_callback)
-    # You can also use the line below instead to run all the optimizer tasks locally, without using queues or agent
-    # optim.start_locally(job_complete_callback=job_complete_callback)
-    # set the time limit for the optimization process (2 hours)
     # wait until process is done (notice we are controlling the optimization process in the background)
     optim.wait()
     # optimization is completed, print the top performing experiments id
-    top_exp = optim.get_top_experiments(top_k=3)
+    top_exp = optim.get_top_experiments(top_k=10)
+    top_details = optim.get_top_experiments_details(top_k=10)
     print([t.id for t in top_exp])
+    print([t for t in top_details])
     # make sure background optimization stopped
     optim.stop()
 

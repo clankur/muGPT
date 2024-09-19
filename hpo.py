@@ -21,7 +21,7 @@ def create_optimizer(base_task_id: str, config: dict):
         objective_metric_series="loss",
         objective_metric_sign="min_global",
         optimizer_class=OptimizerOptuna,
-        execution_queue="v4-32",
+        execution_queue=config['queue'],
         max_number_of_concurrent_tasks=1,  # 100 in the paper
         total_max_jobs=200,  # 800 in the paper
         min_iteration_per_job=1,
@@ -48,6 +48,8 @@ def main():
         description='Run optimization with a specified base task ID.')
     parser.add_argument('--task_id', type=str,
                         help='The base task ID (required)')
+    parser.add_argument('--queue', type=str, default="v4-32",
+                        help='ClearML queue to run your tasks for HPO on')
     args = parser.parse_args()
 
     if args.task_id is None:
@@ -58,6 +60,8 @@ def main():
     base_task: Task = Task.get_task(base_task_id)
     project_name, task_name = base_task.get_project_name(), base_task.name
     config = base_task.get_configuration_object_as_dict('OmegaConf')
+    config['queue'] = args.queue
+
     print(f"Using task ID: {base_task_id}")
     print(f"Project name: {project_name}, Task name: {task_name}")
     task: Task = Task.init(

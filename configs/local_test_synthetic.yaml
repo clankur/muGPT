@@ -9,6 +9,9 @@ training:
   warmup_steps: 10
   steps:        50
   steps_for_lr: 100
+  steps_for_decay: 10
+  amplitude: 4.
+  power_law_exp: -0.51
   tokens:
     batch: 64
     len: 64
@@ -46,7 +49,7 @@ mesh:
   t: 2
 
 flat_tokens:
-  filespec: ''
+  filespec: 'synthetic_dataset.zarr'
   streams: 1
   read_blocks_per_shuffle_buffer: 128
   sequences_per_read_block: 1024

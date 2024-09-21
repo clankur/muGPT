@@ -402,6 +402,7 @@ class TrainingHparams:
     warmup_steps: int
     steps: int
     steps_for_lr: int
+    steps_for_decay: int
     cosine_learning_rate_final_fraction: float
     learning_rate: float
     tokens: TokenBatchParams
@@ -460,7 +461,7 @@ def training_step(
             beta = hparams.tokens.batch
             a = hparams.amplitude
             b = hparams.power_law_exp
-            return jnp.min(hparams.learning_rate, beta * a * n ** b)
+            return jnp.minimum(hparams.learning_rate, beta * a * n ** b).astype(jnp.float32)
 
         warmup_lr = (
             jnp.float32(step) / jnp.float32(hparams.warmup_steps)
@@ -469,12 +470,10 @@ def training_step(
         stable_lr = lr_power(jnp.float32(step))
 
         def annealing_factor(n, T=hparams.steps_for_decay, S=hparams.steps - hparams.steps_for_decay):
-            return 0.5 ** ((n - S) / T)
+            return (0.5 ** ((n - S) / T)).astype(jnp.float32)
 
-        decay_lr = (
-            annealing_factor(step) * lr_power(hparams.steps -
-                                              hparams.steps_for_decay)
-        )
+        decay_lr = annealing_factor(step) * lr_power(hparams.steps -
+                                                     hparams.steps_for_decay)
 
         lr = jnp.where(step > hparams.warmup_steps, stable_lr, warmup_lr)
         lr = jnp.where(step < hparams.steps -

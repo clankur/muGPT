@@ -13,9 +13,13 @@ training:
   warmup_steps: 290 
   steps:        2900 
   steps_for_lr: 2900 
+  steps_for_decay: 100
   learning_rate: 7.3e-3
+  amplitude: 4.
+  power_law_exp: -0.51
   tokens:
     batch: 256
+  
 
 model:
   d_model: 256 

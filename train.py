@@ -396,6 +396,8 @@ class TrainingHparams:
     adam_b2: float
     adam_eps: float
     adam_eps_root: float
+    amplitude: float
+    power_law_exp: float
     weight_decay: float
     warmup_steps: int
     steps: int
@@ -451,23 +453,32 @@ def training_step(
         # because weights and grads are already fully sharded, as checked below.
 
         # Calculate learning rate from step number.
-        # We use linear warmup then cosine decay. See https://arxiv.org/pdf/2307.09288.pdf section 2.2
+        # We use 3 stages of training: a warmup stage, stable training stage, and final decay stage.
+        # See https://arxiv.org/pdf/2408.13359 section 4
+
+        def lr_power(n):
+            beta = hparams.tokens.batch
+            a = hparams.amplitude
+            b = hparams.power_law_exp
+            return jnp.min(hparams.learning_rate, beta * a * n ** b)
+
         warmup_lr = (
             jnp.float32(step) / jnp.float32(hparams.warmup_steps)
-        ) * hparams.learning_rate
-        cosine = jnp.cos(
-            jnp.pi
-            * (
-                jnp.float32(step - hparams.warmup_steps)
-                / jnp.float32(hparams.steps_for_lr - hparams.warmup_steps)
-            )
+        ) * lr_power(hparams.warmup_steps)
+
+        stable_lr = lr_power(jnp.float32(step))
+
+        def annealing_factor(n, T=hparams.steps_for_decay, S=hparams.steps - hparams.steps_for_decay):
+            return 0.5 ** ((n - S) / T)
+
+        decay_lr = (
+            annealing_factor(step) * lr_power(hparams.steps -
+                                              hparams.steps_for_decay)
         )
-        cosine_lr = hparams.learning_rate * (
-            hparams.cosine_learning_rate_final_fraction
-            + (1 - hparams.cosine_learning_rate_final_fraction) *
-            (cosine * 0.5 + 0.5)
-        )
-        lr = jnp.where(step < hparams.warmup_steps, warmup_lr, cosine_lr)
+
+        lr = jnp.where(step > hparams.warmup_steps, stable_lr, warmup_lr)
+        lr = jnp.where(step < hparams.steps -
+                       hparams.steps_for_decay, lr, decay_lr)
 
         # AdamW optimizer with global gradient clipping.
         grad_leaves, grad_treedef = jax.tree_util.tree_flatten(grad)

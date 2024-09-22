@@ -91,10 +91,10 @@ def get_parameterization(style: str):
         return Parameterization(
             embed_init_var=0,
             embed_param_mult=0,
-            embed_grad=1/2,
+            embed_grad=0.5,
             hidden_init_var=1,
             hidden_param_mult=0,
-            hidden_grad=1/2,
+            hidden_grad=0.5,
             unembed_init_var=1,
             unembed_param_mult=0,
             unembed_grad=0
@@ -587,13 +587,14 @@ def training_step(
             unembed=unembed_lr_scale,
             ln1=1.0,
             ln2=1.0,
-            w_q=(h.d_model / base.d_model) ** -p.hidden_grad,
-            w_kv=(h.d_model / base.d_model) ** -p.hidden_grad,
-            w_o=(h.d_head * h.n_kv * h.n_q_per_kv)
-            / (base.d_head * base.n_kv * base.n_q_per_kv) ** -p.hidden_grad,
-            w_gate=h.d_model / base.d_model ** -p.hidden_grad,
-            w_up=h.d_model / base.d_model ** -p.hidden_grad,
-            w_down=h.d_ff / base.d_ff ** -p.hidden_grad,
+            w_q=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_grad,
+            w_kv=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_grad,
+            w_o=h.gamma_hidden * ((h.d_head * h.n_kv * h.n_q_per_kv)
+                                  / (base.d_head * base.n_kv * base.n_q_per_kv)) ** -p.hidden_grad,
+            w_gate=h.gamma_hidden *
+            (h.d_model / base.d_model) ** -p.hidden_grad,
+            w_up=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_grad,
+            w_down=h.gamma_hidden * (h.d_ff / base.d_ff) ** -p.hidden_grad,
             final_layer_norm=1.0,
         )
 

@@ -461,7 +461,9 @@ def training_step(
             beta = hparams.tokens.batch
             a = hparams.amplitude
             b = hparams.power_law_exp
-            return jnp.minimum(hparams.learning_rate, beta * a * n ** b).astype(jnp.float32)
+            # num tokens observed so far
+            n = n * beta * hparams.tokens.len
+            return jnp.minimum(hparams.learning_rate, beta * a * (n) ** b).astype(jnp.float32)
 
         warmup_lr = (
             jnp.float32(step) / jnp.float32(hparams.warmup_steps)

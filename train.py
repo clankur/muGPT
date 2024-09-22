@@ -579,8 +579,6 @@ def training_step(
         p = get_parameterization(h.parameterization)
         embed_lr_scale = h.gamma_embed * \
             (h.d_model / base.d_model) ** -p.embed_grad
-        hidden_lr_scale = h.gamma_hidden * \
-            (h.d_model / base.d_model) ** -p.hidden_grad
         unembed_lr_scale = h.gamma_unembed * \
             (h.d_model / base.d_model) ** -p.unembed_grad
 
@@ -589,13 +587,13 @@ def training_step(
             unembed=unembed_lr_scale,
             ln1=1.0,
             ln2=1.0,
-            w_q=h.d_model / base.d_model * hidden_lr_scale,
-            w_kv=h.d_model / base.d_model * hidden_lr_scale,
+            w_q=(h.d_model / base.d_model) ** -p.hidden_grad,
+            w_kv=(h.d_model / base.d_model) ** -p.hidden_grad,
             w_o=(h.d_head * h.n_kv * h.n_q_per_kv)
-            / (base.d_head * base.n_kv * base.n_q_per_kv) * hidden_lr_scale,
-            w_gate=h.d_model / base.d_model * hidden_lr_scale,
-            w_up=h.d_model / base.d_model * hidden_lr_scale,
-            w_down=h.d_ff / base.d_ff * hidden_lr_scale,
+            / (base.d_head * base.n_kv * base.n_q_per_kv) ** -p.hidden_grad,
+            w_gate=h.d_model / base.d_model ** -p.hidden_grad,
+            w_up=h.d_model / base.d_model ** -p.hidden_grad,
+            w_down=h.d_ff / base.d_ff ** -p.hidden_grad,
             final_layer_norm=1.0,
         )
 
@@ -637,7 +635,7 @@ def training_step(
             # Weight decay
             g += hparams.weight_decay * p
             # Learning rate
-            g *= lr / scale
+            g *= lr * scale
 
             # Apply update
             new_ps.append(p - g)

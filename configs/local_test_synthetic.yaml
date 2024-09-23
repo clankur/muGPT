@@ -32,8 +32,12 @@ model:
     n_q_per_kv: 2
     n_kv: 2
     d_head: 32
-    layers: 2
     d_ff: 1024
+  parameterization: "sp" 
+  gamma_embed: 1. 
+  gamma_hidden: 1. 
+  gamma_unembed: 1. 
+
 
 paths:
   root_working_dir: '/tmp'
@@ -46,7 +50,7 @@ mesh:
   t: 2
 
 flat_tokens:
-  filespec: ''
+  filespec: 'synthetic_dataset.zarr'
   streams: 1
   read_blocks_per_shuffle_buffer: 128
   sequences_per_read_block: 1024

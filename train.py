@@ -88,16 +88,54 @@ def get_parameterization(style: str):
 
     if style.lower() == 'sp':
         return Parameterization(
-            embed_init_var=0,
-            embed_param_mult=0,
+            embed_init_var=0.0,
+            embed_param_mult=0.0,
+            embed_grad=0.5,
+            hidden_init_var=1.0,
+            hidden_param_mult=0.0,
+            hidden_grad=0.5,
+            unembed_init_var=1.0,
+            unembed_param_mult=0.0,
+            unembed_grad=0.0
+        )
+    elif style.lower() == 'mup':
+        return Parameterization(
+            embed_init_var=1,
+            embed_param_mult=0.5,
             embed_grad=0.5,
             hidden_init_var=1,
             hidden_param_mult=0,
-            hidden_grad=0.5,
+            hidden_grad=1,
             unembed_init_var=1,
-            unembed_param_mult=0,
-            unembed_grad=0
+            unembed_param_mult=0.5,
+            unembed_grad=0.5
         )
+    elif style.lower() == 'ntk':
+        return Parameterization(
+            embed_init_var=0,
+            embed_param_mult=0,
+            embed_grad=0.5,
+            hidden_init_var=0,
+            hidden_param_mult=0.5,
+            hidden_grad=1,
+            unembed_init_var=0,
+            unembed_param_mult=0.5,
+            unembed_grad=0.5
+        )
+    elif style.lower() == 'mean-field':
+        return Parameterization(
+            embed_init_var=0,
+            embed_param_mult=0,
+            embed_grad=1,
+            hidden_init_var=0,
+            hidden_param_mult=0.5,
+            hidden_grad=3/2,
+            unembed_init_var=0,
+            unembed_param_mult=1,
+            unembed_grad=1
+        )
+    else:
+        raise ValueError(f"Unknown parameterization style: {style}")
 
 
 @pytree_dataclass

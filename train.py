@@ -258,6 +258,7 @@ class Model:
             w_q = shardops.all_gather(
                 "M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_q))
             q = save_for_backward(
+                hidden_mult *
                 shardops.einsum_unreduced(
                     "B/d L M, M Q K/t D -> B/d L Q K/t D", nx, w_q
                 )
@@ -265,14 +266,18 @@ class Model:
             q = rope_table.apply("L D -> 1 L 1 1 D", q)
             w_kv = shardops.all_gather(
                 "2 M/d K/t D -> 2 M K/t D", jnp.bfloat16(w_kv))
-            k, v = shardops.einsum_unreduced(
+            k, v = hidden_mult * shardops.einsum_unreduced(
                 "B/d L M, k_v M K/t D -> k_v B/d L K/t D", nx, w_kv
             )
             k = save_for_backward(k)
             v = save_for_backward(v)
             k = rope_table.apply("L d -> 1 L 1 d", k)
 
-            logit_scale = h.a_attn * math.sqrt(h.base.d_head) / h.d_head
+            logit_scale = jax.lax.select(
+                h.parameterization.lower() == "mup",
+                h.a_attn * math.sqrt(h.base.d_head) / h.d_head,
+                1.0 / math.sqrt(h.d_head)
+            )
             logits = logit_scale * shardops.einsum_unreduced(
                 "B/d Qlen Q K/t D, B/d Klen K/t D -> B/d Qlen Klen Q K/t",
                 q,
@@ -286,7 +291,7 @@ class Model:
             )
             w_o = shardops.all_gather(
                 "M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_o))
-            attn_out = shardops.einsum_unreduced(
+            attn_out = hidden_mult * shardops.einsum_unreduced(
                 "B/d Qlen Q K/t D, M Q K/t D -> B/d Qlen M", attn_out, w_o
             )
             attn_out = shardops.psum_scatter(
@@ -303,18 +308,22 @@ class Model:
             w_gate = shardops.all_gather(
                 "M/d F/t -> M F/t", jnp.bfloat16(w_gate))
             gate_proj = save_for_backward(
+                hidden_mult *
                 shardops.einsum_unreduced(
                     "B/d L M, M F/t -> B/d L F/t", nx, w_gate)
             )
             w_up = shardops.all_gather("M/d F/t -> M F/t", jnp.bfloat16(w_up))
             up_proj = save_for_backward(
+                hidden_mult *
                 shardops.einsum_unreduced(
                     "B/d L M, M F/t -> B/d L F/t", nx, w_up)
             )
             y = jax.nn.swish(gate_proj) * up_proj
             w_down = shardops.all_gather(
                 "M/d F/t -> M F/t", jnp.bfloat16(w_down))
-            ffn_out = shardops.einsum_unreduced(
+
+            w_down_mult = (h.d_ff / h.base.d_ff) ** -p.hidden_param_mult
+            ffn_out = w_down_mult * shardops.einsum_unreduced(
                 "B/d L F/t, M F/t -> B/d L M", y, w_down
             )
             ffn_out = shardops.psum_scatter("B/d L M -> B/d L M/t", ffn_out)

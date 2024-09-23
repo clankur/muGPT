@@ -1,130 +1,88 @@
-from clearml.automation import LogUniformParameterRange, UniformIntegerParameterRange
+import sys
+import argparse
+from clearml import Task
 from clearml.automation import HyperParameterOptimizer
 from clearml.automation.optuna import OptimizerOptuna
-from clearml import Task
-import numpy as np
-import hydra
-import jax
-import jax_extra
-import os
-from train import Config
-import subprocess
-
-args = {
-    "template_task_id": "69f514621af04bb69ec5e8e84b948635",
-    "run_as_service": False,
-}
+from clearml.automation.parameters import LogUniformParameterRange, UniformParameterRange
 
 
-def create_hpo_task(config: Config):
-    if not args["template_task_id"]:
-        git_branch_name = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        ).stdout.strip()
-        config_name = hydra.core.hydra_config.HydraConfig.get()["job"]["config_name"]
-        project_name = f"{config_name}/{git_branch_name}"
-        task_name = config.paths.model_name
-
-        print(f"{project_name=}")
-        print(f"{task_name=}")
-        args["template_task_id"] = Task.get_task(
-            project_name=f"{config_name}/{git_branch_name}",
-            task_name=config.paths.model_name,
-        ).id
-
+def create_optimizer(base_task_id: str, config: dict):
     return HyperParameterOptimizer(
-        # specifying the task to be optimized, task must be in system already so it can be cloned
-        #   base_task_id=TEMPLATE_TASK_ID,
-        base_task_id=args["template_task_id"],  # 2fbbd3a9216d4e9c963b48b70fcebd89
-        # setting the hyperparameters to optimize
+        base_task_id=base_task_id,
         hyper_parameters=[
-            LogUniformParameterRange(
-                "Hydra/training.learning_rate", min_value=-5, max_value=0
-            ),
-            LogUniformParameterRange("Hydra/model.a_attn", min_value=0, max_value=1),
-            LogUniformParameterRange("Hydra/model.a_output", min_value=0, max_value=1),
+            UniformParameterRange(
+                "Hydra/training.amplitude", min_value=3.0, max_value=5.0),
+            UniformParameterRange(
+                "Hydra/training.power_law_exp", min_value=-.6, max_value=-.4),
         ],
-        # setting the objective metric we want to maximize/minimize
         objective_metric_title="loss",
         objective_metric_series="loss",
-        objective_metric_sign="min",
-        # setting optimizer
+        objective_metric_sign="min_global",
         optimizer_class=OptimizerOptuna,
-        # configuring optimization parameters
-        execution_queue=config.training.queue,
-        max_number_of_concurrent_tasks=1,
-        #   optimization_time_limit=120.,
-        #   compute_time_limit=1200,
-        total_max_jobs=2,
+        execution_queue=config['queue'],
+        max_number_of_concurrent_tasks=1,  # 100 in the paper
+        total_max_jobs=25,  # 800 in the paper
         min_iteration_per_job=1,
-        max_iteration_per_job=150000,
+        max_iteration_per_job=config["steps"],
     )
 
 
 def job_complete_callback(
-    job_id,  # type: str
-    objective_value,  # type: float
-    objective_iteration,  # type: int
-    job_parameters,  # type: dict
-    top_performance_job_id,  # type: str
+    job_id,                 # type: str
+    objective_value,        # type: float
+    objective_iteration,    # type: int
+    job_parameters,         # type: dict
+    top_performance_job_id  # type: str
 ):
-    print(
-        "Job completed!", job_id, objective_value, objective_iteration, job_parameters
-    )
+    print('Job completed!', job_id, objective_value,
+          objective_iteration, job_parameters)
     if job_id == top_performance_job_id:
-        print(
-            "WOOT WOOT we broke the record! Objective reached {}".format(
-                objective_value
-            )
-        )
+        print('WOOT WOOT we broke the record! Objective reached {}'.format(
+            objective_value))
 
 
-@hydra.main(config_path="configs", version_base=None)
-def main(config):
-    config = jax_extra.make_dataclass_from_dict(Config, config)
-    if config.training.queue:
-        # config_name = hydra.core.hydra_config.HydraConfig.get()['job']['config_name']
-        git_branch_name = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        ).stdout.strip()
+def main():
+    parser = argparse.ArgumentParser(
+        description='Run optimization with a specified base task ID.')
+    parser.add_argument('--task_id', type=str,
+                        help='The base task ID (required)')
+    parser.add_argument('--queue', type=str, default="v4-32",
+                        help='ClearML queue to run your tasks for HPO on')
+    args = parser.parse_args()
 
-        task = Task.init(
-            project_name="HPO",
-            task_name=f"Learning rate search {config.paths.model_name}",
-            task_type=Task.TaskTypes.optimizer,
-            reuse_last_task_id=False,
-        )
-        # task.execute_remotely(queue_name='seqax', exit_process=True)
+    if args.task_id is None:
+        parser.print_help()
+        sys.exit(1)
 
-        optimizer = create_hpo_task(config)
-        # report every 12 seconds, this is way too often, but we are testing here J
-        optimizer.set_report_period(3600)
-        # start the optimization process, callback function to be called every time an experiment is completed
-        # this function returns immediately
-        optimizer.start(job_complete_callback=job_complete_callback)
+    base_task_id = args.task_id
+    base_task: Task = Task.get_task(base_task_id)
+    project_name, task_name = base_task.get_project_name(), base_task.name
+    config = base_task.get_configuration_object_as_dict('OmegaConf')
+    config['queue'] = args.queue
 
-        # set the time limit for the optimization process (2 hours)
-        optimizer.set_time_limit(in_minutes=120.0)
-        # wait until process is done (notice we are controlling the optimization process in the background)
-        optimizer.wait()
-        # optimization is completed, print the top performing experiments id
-        top_exp = optimizer.get_top_experiments(top_k=5)
-        print([t.id for t in top_exp])
-        # make sure background optimization stopped
-        optimizer.stop()
-
-        print("We are done, good bye")
-
-        # Step 4: Finalize
-        task.close()
+    print(f"Using task ID: {base_task_id}")
+    print(f"Project name: {project_name}, Task name: {task_name}")
+    task: Task = Task.init(
+        project_name=f"{project_name}/hpo",
+        task_name=f'hpo_{task_name}_gamma_sweep',
+        task_type=Task.TaskTypes.optimizer,
+        reuse_last_task_id=False
+    )
+    optim = create_optimizer(base_task_id, config)
+    # report every 12 mins
+    optim.set_report_period(22.50)
+    # start the optimization process, callback function to be called every time an experiment is completed
+    # this function returns immediately
+    optim.start(job_complete_callback=job_complete_callback)
+    # wait until process is done (notice we are controlling the optimization process in the background)
+    optim.wait()
+    # optimization is completed, print the top performing experiments id
+    top_exp = optim.get_top_experiments(top_k=10)
+    top_details = optim.get_top_experiments_details(top_k=10)
+    print([t.id for t in top_exp])
+    print([t for t in top_details])
+    # make sure background optimization stopped
+    optim.stop()
 
 
 if __name__ == "__main__":

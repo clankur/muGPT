@@ -102,26 +102,26 @@ def get_parameterization(style: str):
     elif style.lower() == 'mup':
         return Parameterization(
             embed_init_var=1,
-            embed_param_mult=1/2,
-            embed_grad=1/2,
+            embed_param_mult=0.5,
+            embed_grad=0.5,
             hidden_init_var=1,
             hidden_param_mult=0,
             hidden_grad=1,
             unembed_init_var=1,
-            unembed_param_mult=1/2,
-            unembed_grad=1/2
+            unembed_param_mult=0.5,
+            unembed_grad=0.5
         )
     elif style.lower() == 'ntk':
         return Parameterization(
             embed_init_var=0,
             embed_param_mult=0,
-            embed_grad=1/2,
+            embed_grad=0.5,
             hidden_init_var=0,
-            hidden_param_mult=1/2,
+            hidden_param_mult=0.5,
             hidden_grad=1,
             unembed_init_var=0,
-            unembed_param_mult=1/2,
-            unembed_grad=1/2
+            unembed_param_mult=0.5,
+            unembed_grad=0.5
         )
     elif style.lower() == 'mean-field':
         return Parameterization(
@@ -129,7 +129,7 @@ def get_parameterization(style: str):
             embed_param_mult=0,
             embed_grad=1,
             hidden_init_var=0,
-            hidden_param_mult=1/2,
+            hidden_param_mult=0.5,
             hidden_grad=3/2,
             unembed_init_var=0,
             unembed_param_mult=1,
@@ -582,6 +582,9 @@ def training_step(
         unembed_lr_scale = h.gamma_unembed * \
             (h.d_model / base.d_model) ** -p.unembed_grad
 
+        target_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
+        base_head_dim = base.n_q_per_kv * base.n_kv * base.d_head
+
         lr_scales = Model(
             embed=embed_lr_scale,
             unembed=unembed_lr_scale,
@@ -589,8 +592,8 @@ def training_step(
             ln2=1.0,
             w_q=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_grad,
             w_kv=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_grad,
-            w_o=h.gamma_hidden * ((h.d_head * h.n_kv * h.n_q_per_kv)
-                                  / (base.d_head * base.n_kv * base.n_q_per_kv)) ** -p.hidden_grad,
+            w_o=h.gamma_hidden * (target_head_dim /
+                                  base_head_dim) ** -p.hidden_grad,
             w_gate=h.gamma_hidden *
             (h.d_model / base.d_model) ** -p.hidden_grad,
             w_up=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_grad,

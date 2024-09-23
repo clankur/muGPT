@@ -117,7 +117,6 @@ class Model:
     @staticmethod
     @typechecked
     def init(h: Hparams, rng: PRNGKey) -> "Model":
-
         # https://github.com/google/jax/issues/20390 for ones_like with sharding.
         ln1 = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
         ln2 = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
@@ -321,9 +320,8 @@ class Model:
             y = jax.nn.swish(gate_proj) * up_proj
             w_down = shardops.all_gather(
                 "M/d F/t -> M F/t", jnp.bfloat16(w_down))
-
-            w_down_mult = (h.d_ff / h.base.d_ff) ** -p.hidden_param_mult
-            ffn_out = w_down_mult * shardops.einsum_unreduced(
+            ffn_out_mult = (h.d_ff / h.base.d_ff) ** -p.hidden_param_mult
+            ffn_out = ffn_out_mult * shardops.einsum_unreduced(
                 "B/d L F/t, M F/t -> B/d L M", y, w_down
             )
             ffn_out = shardops.psum_scatter("B/d L M -> B/d L M/t", ffn_out)

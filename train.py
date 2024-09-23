@@ -214,8 +214,13 @@ class Model:
     def forward_pass(
         self, h: Hparams, ids: u32[b"B/d L"], is_seq_start: bool_[b"B/d L"]
     ) -> f32[b"B/d L V/t"]:
+        p = get_parameterization(h.parameterization)
+        embed_mult = (h.d_model / h.base.d_model) ** -p.embed_param_mult
+        hidden_mult = (h.d_model / h.base.d_model) ** -p.hidden_param_mult
+        unembed_mult = (h.d_model / h.base.d_model) ** -p.unembed_param_mult
+
         # Initial embedding lookup.
-        embed = shardops.all_gather(
+        embed = embed_mult * shardops.all_gather(
             "V/t M/d -> V/t M", jnp.bfloat16(self.embed))
         x = shardops.index_unreduced("[V/t] M, B/d L -> B/d L M", embed, ids)
         x = shardops.psum_scatter("B/d L M -> B/d L M/t", x)
@@ -336,8 +341,7 @@ class Model:
         ln = shardops.all_gather(
             "M/t/d -> M", jnp.float32(self.final_layer_norm))
         x = jnp.bfloat16(rms_norm(x) * ln)
-        unembed_scale = h.a_output * h.base.d_model / h.d_model
-        unembed = unembed_scale * shardops.all_gather(
+        unembed = unembed_mult * shardops.all_gather(
             "V/t M/d -> V/t M", jnp.bfloat16(self.unembed)
         )
         logits = shardops.einsum_unreduced(

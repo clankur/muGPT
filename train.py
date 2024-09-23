@@ -1,6 +1,5 @@
 """Main training loop, including the model, loss function, and optimizer."""
 
-from collections import namedtuple
 from jax.tree_util import tree_leaves
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
@@ -37,7 +36,7 @@ import os
 import time
 import subprocess
 import signal
-
+from collections import namedtuple
 import env
 
 env.set_variables()
@@ -99,44 +98,6 @@ def get_parameterization(style: str):
             unembed_param_mult=0,
             unembed_grad=0
         )
-    elif style.lower() == 'mup':
-        return Parameterization(
-            embed_init_var=1,
-            embed_param_mult=0.5,
-            embed_grad=0.5,
-            hidden_init_var=1,
-            hidden_param_mult=0,
-            hidden_grad=1,
-            unembed_init_var=1,
-            unembed_param_mult=0.5,
-            unembed_grad=0.5
-        )
-    elif style.lower() == 'ntk':
-        return Parameterization(
-            embed_init_var=0,
-            embed_param_mult=0,
-            embed_grad=0.5,
-            hidden_init_var=0,
-            hidden_param_mult=0.5,
-            hidden_grad=1,
-            unembed_init_var=0,
-            unembed_param_mult=0.5,
-            unembed_grad=0.5
-        )
-    elif style.lower() == 'mean-field':
-        return Parameterization(
-            embed_init_var=0,
-            embed_param_mult=0,
-            embed_grad=1,
-            hidden_init_var=0,
-            hidden_param_mult=0.5,
-            hidden_grad=3/2,
-            unembed_init_var=0,
-            unembed_param_mult=1,
-            unembed_grad=1
-        )
-    else:
-        raise ValueError(f"Unknown parameterization style: {style}")
 
 
 @pytree_dataclass
@@ -156,34 +117,6 @@ class Model:
     @staticmethod
     @typechecked
     def init(h: Hparams, rng: PRNGKey) -> "Model":
-        # The constant is stddev of standard normal truncated to (-2, 2)
-        truncated_normal_stddev = 0.87962566103423978
-        p = get_parameterization(h.parameterization)
-        base = h.base
-
-        # scale for tensors with fan_in and truncated normal truncated to (-2, 2)
-        d_model_scale = (math.sqrt(base.d_model) / (h.d_model * truncated_normal_stddev)) ** (
-            p.hidden_init_var
-        )
-        embed_scale = (math.sqrt(base.d_model) / (h.d_model * truncated_normal_stddev)) ** (
-            p.embed_init_var
-        )
-        unembed_scale = (math.sqrt(base.d_model) / (h.d_model * truncated_normal_stddev)) ** (
-            p.unembed_init_var
-        )
-        d_ff_scale = (math.sqrt(base.d_ff) / (h.d_ff * truncated_normal_stddev)) ** (
-            p.hidden_init_var
-        )
-        # theoretically total_head_dim = d_model
-        total_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
-        base_head_dim = base.n_q_per_kv * base.n_kv * base.d_head
-        total_head_dim_scale = (math.sqrt(base_head_dim) / (total_head_dim * truncated_normal_stddev)) ** (
-            p.hidden_init_var
-        )
-
-        embed = embed_scale * jax.random.normal(
-            jax_extra.fold_in_str(rng, "embed"), (h.vocab, h.d_model), dtype=jnp.float32
-        )
 
         # https://github.com/google/jax/issues/20390 for ones_like with sharding.
         ln1 = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
@@ -192,16 +125,38 @@ class Model:
 
         # All of wi/wq/wo/wo/w_kv use truncated_normal initializers with 'fan_in' scaling,
         # i.e. variance set to 1.0/fan_in.
-        w_kv_scale = d_model_scale
-        w_up_scale = d_model_scale
+        # The constant is stddev of standard normal truncated to (-2, 2)
+        truncated_normal_stddev = 0.87962566103423978
+        p = get_parameterization(h.parameterization)
+        base = h.base
 
-        w_down_scale = d_ff_scale
+        embed_scale = (math.sqrt(base.d_model) / (h.d_model * truncated_normal_stddev)) ** (
+            p.embed_init_var
+        )
+        # scale for tensors with d_model fan_in and truncated normal truncated to (-2, 2)
+        d_model_scale = (math.sqrt(base.d_model) / (h.d_model * truncated_normal_stddev)) ** (
+            p.hidden_init_var
+        )
+        w_kv_scale = d_model_scale
+        target_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
+        base_head_dim = base.n_q_per_kv * base.n_kv * base.d_head
+        w_o_scale = (math.sqrt(base_head_dim) / (target_head_dim * truncated_normal_stddev)) ** (
+            p.hidden_init_var
+        )
+        w_up_scale = d_model_scale
+        w_down_scale = (math.sqrt(base.d_ff) / (h.d_ff * truncated_normal_stddev)) ** (
+            p.hidden_init_var
+        )
+
         w_kv_shape = (h.layers, 2, h.d_model, h.n_kv, h.d_head)
         w_kv = w_kv_scale * jax.random.truncated_normal(
             fold_in_str(rng, "w_kv"), -2, 2, w_kv_shape, dtype=jnp.float32
         )
 
         ff_shape = (h.layers, h.d_model, h.d_ff)
+        embed = embed_scale * jax.random.normal(
+            jax_extra.fold_in_str(rng, "embed"), (h.vocab, h.d_model), dtype=jnp.float32
+        )
         w_gate = w_up_scale * jax.random.truncated_normal(
             fold_in_str(rng, "w_gate"), -2, 2, ff_shape, dtype=jnp.float32
         )
@@ -214,9 +169,10 @@ class Model:
 
         w_q_scale = d_model_scale
         w_q_shape = (h.layers, h.d_model, h.n_q_per_kv, h.n_kv, h.d_head)
-
-        w_o_scale = total_head_dim_scale
         w_o_shape = w_q_shape
+        unembed_scale = (math.sqrt(base.d_model) / (h.d_model * truncated_normal_stddev)) ** (
+            p.unembed_init_var
+        )
         w_o = w_o_scale * jax.random.truncated_normal(
             fold_in_str(rng, "w_o"), -2, 2, w_o_shape, dtype=jnp.float32
         )
@@ -254,16 +210,14 @@ class Model:
         shardings = make_shardings(Model)
         return jax.tree.map(lax.with_sharding_constraint, arrays, shardings)
 
-    @ typechecked
+    @typechecked
     def forward_pass(
         self, h: Hparams, ids: u32[b"B/d L"], is_seq_start: bool_[b"B/d L"]
     ) -> f32[b"B/d L V/t"]:
-        p = get_parameterization(h.parameterization)
         # Initial embedding lookup.
         embed = shardops.all_gather(
             "V/t M/d -> V/t M", jnp.bfloat16(self.embed))
-        x = ((h.d_model / h.base.d_model) ** -p.embed_param_mult) * \
-            shardops.index_unreduced("[V/t] M, B/d L -> B/d L M", embed, ids)
+        x = shardops.index_unreduced("[V/t] M, B/d L -> B/d L M", embed, ids)
         x = shardops.psum_scatter("B/d L M -> B/d L M/t", x)
 
         L = ids.shape[1]
@@ -282,11 +236,9 @@ class Model:
 
         rope_table = RopeTable.create(L, h)
 
-        param_multiplier = (h.d_model / h.base.d_model) ** -p.hidden_param_mult
         # Transformer blocks.
-
-        @ explicit_activation_checkpointing
-        @ typechecked
+        @explicit_activation_checkpointing
+        @typechecked
         def loop_body(
             x: bf16[b"B/d L M/t"], layer_weights: Any
         ) -> Tuple[bf16[b"B/d L M/t"], Tuple[()]]:
@@ -300,7 +252,7 @@ class Model:
             # Attention, using Grouped Query Attention and RoPE position embeddings.
             w_q = shardops.all_gather(
                 "M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_q))
-            q = param_multiplier * save_for_backward(
+            q = save_for_backward(
                 shardops.einsum_unreduced(
                     "B/d L M, M Q K/t D -> B/d L Q K/t D", nx, w_q
                 )
@@ -308,18 +260,14 @@ class Model:
             q = rope_table.apply("L D -> 1 L 1 1 D", q)
             w_kv = shardops.all_gather(
                 "2 M/d K/t D -> 2 M K/t D", jnp.bfloat16(w_kv))
-            k, v = param_multiplier * shardops.einsum_unreduced(
+            k, v = shardops.einsum_unreduced(
                 "B/d L M, k_v M K/t D -> k_v B/d L K/t D", nx, w_kv
             )
             k = save_for_backward(k)
             v = save_for_backward(v)
             k = rope_table.apply("L d -> 1 L 1 d", k)
-            logit_scale = jax.lax.select(
-                h.parameterization.lower() == "mup",
-                h.a_attn * math.sqrt(h.base.d_head) / h.d_head,
-                1.0
-            )
 
+            logit_scale = h.a_attn * math.sqrt(h.base.d_head) / h.d_head
             logits = logit_scale * shardops.einsum_unreduced(
                 "B/d Qlen Q K/t D, B/d Klen K/t D -> B/d Qlen Klen Q K/t",
                 q,
@@ -333,7 +281,7 @@ class Model:
             )
             w_o = shardops.all_gather(
                 "M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_o))
-            attn_out = param_multiplier * shardops.einsum_unreduced(
+            attn_out = shardops.einsum_unreduced(
                 "B/d Qlen Q K/t D, M Q K/t D -> B/d Qlen M", attn_out, w_o
             )
             attn_out = shardops.psum_scatter(
@@ -350,20 +298,18 @@ class Model:
             w_gate = shardops.all_gather(
                 "M/d F/t -> M F/t", jnp.bfloat16(w_gate))
             gate_proj = save_for_backward(
-                param_multiplier *
                 shardops.einsum_unreduced(
                     "B/d L M, M F/t -> B/d L F/t", nx, w_gate)
             )
             w_up = shardops.all_gather("M/d F/t -> M F/t", jnp.bfloat16(w_up))
             up_proj = save_for_backward(
-                param_multiplier *
                 shardops.einsum_unreduced(
                     "B/d L M, M F/t -> B/d L F/t", nx, w_up)
             )
             y = jax.nn.swish(gate_proj) * up_proj
             w_down = shardops.all_gather(
                 "M/d F/t -> M F/t", jnp.bfloat16(w_down))
-            ffn_out = param_multiplier * shardops.einsum_unreduced(
+            ffn_out = shardops.einsum_unreduced(
                 "B/d L F/t, M F/t -> B/d L M", y, w_down
             )
             ffn_out = shardops.psum_scatter("B/d L M -> B/d L M/t", ffn_out)
@@ -390,15 +336,11 @@ class Model:
         ln = shardops.all_gather(
             "M/t/d -> M", jnp.float32(self.final_layer_norm))
         x = jnp.bfloat16(rms_norm(x) * ln)
-        unembed_scale = jax.lax.select(
-            h.parameterization.lower() == "mup",
-            h.a_output * h.base.d_model / h.d_model,
-            1.0
-        )
+        unembed_scale = h.a_output * h.base.d_model / h.d_model
         unembed = unembed_scale * shardops.all_gather(
             "V/t M/d -> V/t M", jnp.bfloat16(self.unembed)
         )
-        logits = ((h.d_model / h.base.d_model) ** -p.unembed_param_mult) * shardops.einsum_unreduced(
+        logits = shardops.einsum_unreduced(
             "B/d L M, V/t M -> B/d L V/t",
             x,
             unembed,

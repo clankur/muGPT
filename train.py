@@ -398,7 +398,7 @@ class Model:
 
         return logits
 
-    @ typechecked
+    @typechecked
     def loss(self, h: Hparams, batch: TokenBatch) -> f32[b""]:
         # Given sequence-packed targets:
         #   [[1, 2], [3, 4, 5], [6, 7, 8, 9]]
@@ -431,12 +431,12 @@ class Model:
         return -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch)
 
 
-@ pytree_dataclass
+@pytree_dataclass
 class RopeTable:
     sin: f32["len d_head2"]
     cos: f32["len d_head2"]
 
-    @ staticmethod
+    @staticmethod
     def create(max_len: int, hparams: Hparams) -> "RopeTable":
         rope_max_timescale = hparams.rope_max_timescale
         d_head = hparams.d_head
@@ -461,7 +461,7 @@ class RopeTable:
         return jnp.append(r1, r2, axis=-1)
 
 
-@ typechecked
+@typechecked
 def rms_norm(x: bf16[b"batch/d len M"]) -> bf16[b"batch/d len M"]:
     mean2 = save_for_backward(
         jnp.mean(jax.lax.square(jnp.float32(x)), axis=-1, keepdims=True)
@@ -469,7 +469,7 @@ def rms_norm(x: bf16[b"batch/d len M"]) -> bf16[b"batch/d len M"]:
     return jnp.bfloat16(x * jax.lax.rsqrt(mean2 + 1e-6))
 
 
-@ pytree_dataclass
+@pytree_dataclass
 class Metrics:
     loss: f32[b""]
     learning_rate: f32[b""]
@@ -477,7 +477,7 @@ class Metrics:
     raw_grad_norm: f32[b""]
 
 
-@ dataclass(frozen=True)
+@dataclass(frozen=True)
 class TrainingHparams:
     adam_b1: float
     adam_b2: float
@@ -495,13 +495,13 @@ class TrainingHparams:
     use_grad_clip: bool = True
 
 
-@ pytree_dataclass
+@pytree_dataclass
 class State:
     weights: Model
     adam_mu: Model
     adam_nu: Model
 
-    @ staticmethod
+    @staticmethod
     def init(hparams: Hparams, rng: PRNGKey) -> "State":
         weights = Model.init(hparams, rng)
         adam_mu = jax.tree.map(lambda p: p * 0.0, weights)
@@ -509,7 +509,7 @@ class State:
         return State(weights=weights, adam_mu=adam_mu, adam_nu=adam_nu)
 
 
-@ partial(jax.jit, static_argnums=(2, 3), donate_argnums=(0,))
+@partial(jax.jit, static_argnums=(2, 3), donate_argnums=(0,))
 def training_step(
     state: State,
     step: u32[b""],
@@ -517,7 +517,7 @@ def training_step(
     hparams: TrainingHparams,
     batch: TokenBatch,
 ) -> Tuple[Any, Metrics]:
-    @ partial(
+    @partial(
         shardtypes.typed_shard_map, check_rep=False
     )  # check_rep=False for https://github.com/google/jax/issues/20335
     def sharded_step(
@@ -653,19 +653,19 @@ def training_step(
     return sharded_step(state, step, batch)
 
 
-@ dataclass(frozen=True)
+@dataclass(frozen=True)
 class Paths:
     root_working_dir: str
     model_name: Optional[str]
 
 
-@ dataclass(frozen=True)
+@dataclass(frozen=True)
 class MeshConfig:
     d: int
     t: int
 
 
-@ dataclass(frozen=True)
+@dataclass(frozen=True)
 class Config:
     model: Hparams
     training: TrainingHparams
@@ -685,7 +685,7 @@ class Config:
             self.flat_tokens is not None and self.hf_dataset is not None
         ), "Should not specify both flat_tokens and hf_dataset."
 
-    @ cached_property
+    @cached_property
     def training_data(self) -> Union[FlatTokensParams, HuggingFaceDataParams]:
         return self.flat_tokens or self.hf_dataset
 
@@ -823,7 +823,7 @@ def get_model_name(config_name: str):
     return f"{config_name}_{overrides}" if overrides else config_name
 
 
-@ hydra.main(config_path="configs", version_base=None)
+@hydra.main(config_path="configs", version_base=None)
 def main(config):
     config = jax_extra.make_dataclass_from_dict(Config, config)
     if config.training.queue:

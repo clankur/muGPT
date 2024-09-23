@@ -46,7 +46,7 @@ mesh:
   t: 2
 
 flat_tokens:
-  filespec: ''
+  filespec: 'synthetic_dataset.zarr'
   streams: 1
   read_blocks_per_shuffle_buffer: 128
   sequences_per_read_block: 1024

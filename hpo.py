@@ -1,4 +1,5 @@
 import sys
+import subprocess
 import argparse
 from clearml import Task
 from clearml.automation import HyperParameterOptimizer
@@ -59,17 +60,24 @@ def main():
     project_name, task_name = base_task.get_project_name(), base_task.name
     config = base_task.get_configuration_object_as_dict('OmegaConf')
     config['queue'] = args.queue
+    git_branch_name = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
 
     print(f"Using task ID: {base_task_id}")
     print(f"Project name: {project_name}, Task name: {task_name}")
     task: Task = Task.init(
         project_name=f"{project_name}/hpo",
-        task_name=f'hpo_{task_name}_gamma_sweep',
+        task_name=f'hpo_{task_name}_{git_branch_name}_search',
         task_type=Task.TaskTypes.optimizer,
         reuse_last_task_id=False
     )
     optim = create_optimizer(base_task_id, config)
-    # report every 12 mins
+    # report every 22.5 mins
     optim.set_report_period(22.50)
     # start the optimization process, callback function to be called every time an experiment is completed
     # this function returns immediately

@@ -4,13 +4,19 @@ import argparse
 from clearml import Task
 from clearml.automation import HyperParameterOptimizer
 from clearml.automation.optuna import OptimizerOptuna
-from clearml.automation.parameters import LogUniformParameterRange, UniformParameterRange
+from clearml.automation.parameters import LogUniformParameterRange, UniformParameterRange, DiscreteParameterRange
 
 
 def create_optimizer(base_task_id: str, config: dict):
     return HyperParameterOptimizer(
         base_task_id=base_task_id,
         hyper_parameters=[
+            # DiscreteParameterRange(
+            #     "Hydra/training.tokens.batch", values=[256]
+            # ),
+            DiscreteParameterRange(
+                "Hydra/training.steps", values=[7640, 15280, 30560]
+            ),
             UniformParameterRange(
                 "Hydra/training.amplitude", min_value=3.0, max_value=5.0),
             UniformParameterRange(

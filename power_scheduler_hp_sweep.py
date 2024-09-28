@@ -94,7 +94,15 @@ def bayesian_sweep(
     def objective(**params):
         # This wrapper allows skopt to use your train function
         params["Hydra/training.steps"] = current_training_length
-        return train(params, template_task_id=template_task_id)
+        iteration = parent_task.get_last_iteration() + 1
+        loss = train(params, template_task_id=template_task_id)
+        for metric, value in params.items():
+            title = f"{metric}_steps={current_training_length}"
+            logger.report_scalar(
+                title=title, series=metric, value=float(value), iteration=iteration)
+            print('Best {}: {}'.format(title, value))
+
+        return loss
 
     def bayesian_optimization(training_length: int, n_calls=50):
         """

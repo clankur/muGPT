@@ -1,10 +1,13 @@
 import sys
 import subprocess
 import argparse
-from clearml import Task
+from clearml import Task, Logger
 from clearml.automation import HyperParameterOptimizer
 from clearml.automation.optuna import OptimizerOptuna
 from clearml.automation.parameters import LogUniformParameterRange, UniformParameterRange, DiscreteParameterRange
+
+task: Task = None
+logger: Logger = None
 
 
 def create_optimizer(base_task_id: str, config: dict):
@@ -15,7 +18,7 @@ def create_optimizer(base_task_id: str, config: dict):
             #     "Hydra/training.tokens.batch", values=[256]
             # ),
             DiscreteParameterRange(
-                "Hydra/training.steps", values=[7640, 15280, 30560]
+                "Hydra/training.steps", values=[2900, 5800, 11600, 23200]
             ),
             UniformParameterRange(
                 "Hydra/training.amplitude", min_value=3.0, max_value=5.0),
@@ -43,12 +46,23 @@ def job_complete_callback(
 ):
     print('Job completed!', job_id, objective_value,
           objective_iteration, job_parameters)
+
     if job_id == top_performance_job_id:
         print('WOOT WOOT we broke the record! Objective reached {}'.format(
             objective_value))
+        for metric, value in job_parameters.items():
+            print(value.dtype)
+            if metric == 'status':
+                continue
+            if logger:
+                logger.report_scalar(
+                    title=metric, series=metric, value=float(value), iteration=task.get_last_iteration())
+            else:
+                print('Best {}: {}'.format(metric, value))
 
 
 def main():
+    global logger
     parser = argparse.ArgumentParser(
         description='Run optimization with a specified base task ID.')
     parser.add_argument('--task_id', type=str,
@@ -82,6 +96,8 @@ def main():
         task_type=Task.TaskTypes.optimizer,
         reuse_last_task_id=False
     )
+    logger = task.get_logger()
+
     optim = create_optimizer(base_task_id, config)
     # report every 22.5 mins
     optim.set_report_period(22.50)

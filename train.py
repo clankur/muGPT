@@ -401,8 +401,6 @@ class TrainingHparams:
     weight_decay: float
     warmup_steps: int
     steps: int
-    steps_for_lr: int
-    steps_for_decay: int
     cosine_learning_rate_final_fraction: float
     learning_rate: float
     tokens: TokenBatchParams
@@ -470,16 +468,17 @@ def training_step(
         ) * lr_power(hparams.warmup_steps)
 
         stable_lr = lr_power(jnp.float32(step))
+        steps_for_decay = 0.1 * hparams.steps
 
-        def annealing_factor(n, T=hparams.steps_for_decay, S=hparams.steps - hparams.steps_for_decay):
+        def annealing_factor(n, T=steps_for_decay, S=hparams.steps - steps_for_decay):
             return (0.5 ** ((n - S) / T)).astype(jnp.float32)
 
         decay_lr = annealing_factor(step) * lr_power(hparams.steps -
-                                                     hparams.steps_for_decay)
+                                                     steps_for_decay)
 
         lr = jnp.where(step > hparams.warmup_steps, stable_lr, warmup_lr)
         lr = jnp.where(step < hparams.steps -
-                       hparams.steps_for_decay, lr, decay_lr)
+                       steps_for_decay, lr, decay_lr)
 
         # AdamW optimizer with global gradient clipping.
         grad_leaves, grad_treedef = jax.tree_util.tree_flatten(grad)

@@ -12,9 +12,9 @@ mesh:
 training:
   warmup_steps: 290 
   steps:        2900 
-  learning_rate: 0.02 
-  amplitude: 3.
-  power_law_exp: -0.6
+  learning_rate: 0.02
+  amplitude: 2.4929835408416423
+  power_law_exp: -0.6102458825048835
   tokens:
     batch: 256
   

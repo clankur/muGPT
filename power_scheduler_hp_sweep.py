@@ -14,8 +14,7 @@ from skopt.utils import use_named_args
 from typing import Dict, List, Tuple
 
 
-class SweepConfig(Config):
-    base_task_id: Optional[str] = None
+base_task_id: str = "5b81981fb58847f2b65ade8252d1ae38"
 
 
 def get_task_details(config: Config):
@@ -28,15 +27,10 @@ def get_task_details(config: Config):
     ).stdout.strip()
     config_name = hydra.core.hydra_config.HydraConfig.get()[
         "job"]["config_name"]
-    project_name = (
-        config.project_name
-        if config.project_name
-        else f"{config_name}/{git_branch_name}"
-    )
+    project_name = f"{config_name}/{git_branch_name}"
+    base_task: Task = Task.get_task(base_task_id)
 
-    task_name = config.model_name
-
-    return project_name, task_name
+    return project_name, base_task.name
 
 
 def bayesian_sweep(
@@ -46,10 +40,12 @@ def bayesian_sweep(
     template_task_id,
     training_length
 ):
-    project_name = f"{config_name}/lr_sweep"
-    task_name = f"{model_name}_lr_sweep_{datetime.now().strftime('%Y%m%d_%H%M')}"
+    project_name = f"{config_name}/hp_sweep"
+    task_name = f"{model_name}_hp_sweep_{datetime.now().strftime('%Y%m%d_%H%M')}"
     parent_task = Task.init(project_name=project_name, task_name=task_name)
     logger = parent_task.get_logger()
+
+    sweep_iteration = 0
 
     def exponential_moving_average(data, alpha=0.03):
         """
@@ -65,46 +61,48 @@ def bayesian_sweep(
     def train(parameters: Dict, template_task_id):
         # Clone the template task and override the learning rate
         model_overrides = ''.join(
-            [f"_{key}={value}" for k, v in parameters.items()])
+            [f"_{k.split('.')[-1]}={v}" for k, v in parameters.items()])
         child_task: Task = Task.clone(
             source_task=template_task_id,
-            name=f"{model_name}_{model_overrides}",
+            name=f"{model_name}{model_overrides}",
         )
         child_task.set_system_tags([])
         for key, value in parameters.items():
             child_task.set_parameter(key, value)
         print(f"training model {model_name} with overrides: {model_overrides}")
         Task.enqueue(child_task.id, queue_name=queue_name)
-        child_task.wait_for_status(check_interval_sec=600)
+        child_task.wait_for_status(check_interval_sec=120)
 
         # Get the loss from the child task
         scalars = child_task.get_reported_scalars()
 
         loss = scalars["loss"]["loss"]["y"]
         smoothed_loss = exponential_moving_average(loss, alpha=1 - 0.97)
-        return smoothed_loss[-1], child_task.id
+        return smoothed_loss[-1]
 
     # Define the search space
     space = [
-        Real(3.0, 5.0, name='Hydra/training.amplitude'),
-        Real(-0.6, -0.4, name='Hydra/training.power_law_exp'),
+        Real(2.0, 3.0, name='Hydra/training.amplitude'),
+        Real(-0.7, -0.6, name='Hydra/training.power_law_exp'),
     ]
 
     @use_named_args(space)
     def objective(**params):
-        # This wrapper allows skopt to use your train function
+        nonlocal sweep_iteration
         params["Hydra/training.steps"] = current_training_length
-        iteration = parent_task.get_last_iteration() + 1
+        # iteration = parent_task.get_last_iteration() + 1
         loss = train(params, template_task_id=template_task_id)
         for metric, value in params.items():
             title = f"{metric}_steps={current_training_length}"
             logger.report_scalar(
-                title=title, series=metric, value=float(value), iteration=iteration)
-            print('Best {}: {}'.format(title, value))
+                title=title, series=metric, value=float(value), iteration=sweep_iteration)
+            print('{}: {}'.format(title, value))
+
+        sweep_iteration += 1
 
         return loss
 
-    def bayesian_optimization(training_length: int, n_calls=50):
+    def bayesian_optimization(training_length: int, n_calls=20):
         """
         Perform Bayesian Optimization for hyperparameter tuning.
 
@@ -131,7 +129,7 @@ def bayesian_sweep(
             print(f"{name}: {value}")
         print(f"Best score: {result.fun}")
 
-    def optimize_for_multiple_lengths(base_length: int, multipliers: List[int] = [1, 2, 4, 8], n_calls=50) -> List[Tuple[int, Dict, float]]:
+    def optimize_for_multiple_lengths(base_length: int, multipliers: List[int] = [1], n_calls=20) -> List[Tuple[int, Dict, float]]:
         """
         Run Bayesian Optimization for multiple training lengths.
 
@@ -147,37 +145,37 @@ def bayesian_sweep(
             print(f"\nOptimizing for training length: {training_length}")
 
             result = bayesian_optimization(training_length, n_calls)
+            print(result)
 
-            best_params = dict(zip([dim.name for dim in space], result.x))
+            best_params = dict(zip([dim.name for dim in space], result))
             results.append((training_length, best_params, result.fun))
 
         return results
 
     result = optimize_for_multiple_lengths(base_length=training_length)
-    print_result(result)
+    # print_result(result)
     parent_task.close()
 
 
 @hydra.main(config_path="configs", version_base=None)
 def main(config):
-    config = jax_extra.make_dataclass_from_dict(SweepConfig, config)
+    config = jax_extra.make_dataclass_from_dict(Config, config)
+    print(config)
     config_name = hydra.core.hydra_config.HydraConfig.get()[
         "job"]["config_name"]
+
     project_name, task_name = get_task_details(config)
 
     print(f"{project_name=}")
     print(f"{task_name=}")
 
-    template_task_id = config.base_task_id if config.base_task_id else Task.get_task(
-        project_name=project_name,
-        task_name=task_name,
-    ).id
+    template_task_id = base_task_id
 
     print(f"{template_task_id=}")
     bayesian_sweep(
         config_name=config_name,
-        model_name=config.model_name,
-        queue_name=config.queue_name,
+        model_name=task_name,
+        queue_name=config.training.queue,
         template_task_id=template_task_id,
         training_length=config.training.steps
     )

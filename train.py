@@ -83,6 +83,7 @@ class Model:
     ln2: f32["layers d_model/t/d"]
     w_q: f32["layers d_model/d n_q_per_kv n_kv/t d_head"]
     w_kv: f32["layers 2 d_model/d n_kv/t d_head"]
+    w_score: f32["layers d_model/d"]
     w_o: f32["layers d_model/d n_q_per_kv n_kv/t d_head"]
     w_gate: f32["layers d_model/d d_ff/t"]
     w_up: f32["layers d_model/d d_ff/t"]
@@ -118,6 +119,11 @@ class Model:
         w_kv_shape = (h.layers, 2, h.d_model, h.n_kv, h.d_head)
         w_kv = w_kv_scale * jax.random.truncated_normal(
             fold_in_str(rng, "w_kv"), -2, 2, w_kv_shape, dtype=jnp.float32
+        )
+
+        w_score_shape = (h.layers, h.d_model)
+        w_score = jax.random.truncated_normal(
+            fold_in_str(rng, "w_score"), -2, 2, w_score_shape, dtype=jnp.float32
         )
 
         ff_shape = (h.layers, h.d_model, h.d_ff)
@@ -163,6 +169,7 @@ class Model:
             ln2=ln2,
             w_q=w_q,
             w_kv=w_kv,
+            w_score=w_score,
             w_o=w_o,
             w_gate=w_gate,
             w_up=w_up,
@@ -204,7 +211,7 @@ class Model:
         def loop_body(
             x: bf16[b"B/d L M/t"], layer_weights: Any
         ) -> Tuple[bf16[b"B/d L M/t"], Tuple[()]]:
-            w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2 = layer_weights
+            w_q, w_kv, w_score, w_o, w_gate, w_up, w_down, ln1, ln2 = layer_weights
 
             # Pre-attention RMSNorm
             ln1 = shardops.all_gather("M/t/d -> M", jnp.float32(ln1))
@@ -228,6 +235,23 @@ class Model:
             k = save_for_backward(k)
             v = save_for_backward(v)
             k = rope_table.apply("L d -> 1 L 1 d", k)
+
+            # Sparse K selection as outlined in: https://arxiv.org/pdf/2406.16747
+            # scoring kv pairs
+            u = shardops.einsum_unreduced(
+                "B/d L M, M -> B/d L", nx, w_score
+            )  # TODO: add d_u = i * epsilon
+            # i is the sequence in x, epsilon is a small positive scalar
+
+            # apply selections and use their masks to select what pairs remain in K, V
+            # m_sparse_k =  sparse_k(u)
+            # m_top_k = top_k(u)
+
+            # delta_hard = m_top_k mask
+            # delta_soft = m_sparse_k mask
+
+            # k, v = mask only i's kept in selection
+            # 3.5 mentions using delta_hard for K, delta_soft for V
 
             logit_scale = h.a_attn * math.sqrt(h.base.d_head) / h.d_head
             logits = logit_scale * shardops.einsum_unreduced(

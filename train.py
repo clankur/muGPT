@@ -79,63 +79,125 @@ class Hparams:
     gamma_unembed: float
 
 
-def get_parameterization(style: str):
-    Parameterization = namedtuple('Parameterization', [
-        'embed_init_var', 'embed_param_mult', 'embed_grad',
-        'hidden_init_var', 'hidden_param_mult', 'hidden_grad',
-        'unembed_init_var', 'unembed_param_mult', 'unembed_grad'
-    ])
+def get_parameterization(style: str, fully_aligned: bool = True):
+    Parameterization = namedtuple(
+        "Parameterization",
+        [
+            "embed_init_var",
+            "embed_param_mult",
+            "embed_lr",
+            "embed_grad",
+            "hidden_init_var",
+            "hidden_param_mult",
+            "hidden_lr",
+            "hidden_grad",
+            "unembed_init_var",
+            "unembed_param_mult",
+            "unembed_lr",
+            "unembed_grad",
+        ],
+    )
 
-    if style.lower() == 'sp':
-        return Parameterization(
+    base_params = {
+        "sp": Parameterization(
             embed_init_var=0.0,
             embed_param_mult=0.0,
+            embed_lr=0.0,
             embed_grad=0.5,
             hidden_init_var=1.0,
             hidden_param_mult=0.0,
+            hidden_lr=1.0,
             hidden_grad=0.5,
             unembed_init_var=1.0,
             unembed_param_mult=0.0,
-            unembed_grad=0.0
-        )
-    elif style.lower() == 'mup':
-        return Parameterization(
-            embed_init_var=1,
+            unembed_lr=1.0,
+            unembed_grad=0.0,
+        ),
+        "mup": Parameterization(
+            embed_init_var=1.0,
             embed_param_mult=0.5,
+            embed_lr=0.5,
             embed_grad=0.5,
-            hidden_init_var=1,
-            hidden_param_mult=0,
-            hidden_grad=1,
-            unembed_init_var=1,
+            hidden_init_var=1.0,
+            hidden_param_mult=0.0,
+            hidden_lr=1.0,
+            hidden_grad=1.0,
+            unembed_init_var=1.0,
             unembed_param_mult=0.5,
-            unembed_grad=0.5
-        )
-    elif style.lower() == 'ntk':
-        return Parameterization(
-            embed_init_var=0,
-            embed_param_mult=0,
+            unembed_lr=0.5,
+            unembed_grad=0.5,
+        ),
+        "ntk": Parameterization(
+            embed_init_var=0.0,
+            embed_param_mult=0.0,
+            embed_lr=0.0,
             embed_grad=0.5,
-            hidden_init_var=0,
+            hidden_init_var=0.0,
             hidden_param_mult=0.5,
-            hidden_grad=1,
-            unembed_init_var=0,
+            hidden_lr=0.5,
+            hidden_grad=1.0,
+            unembed_init_var=0.0,
             unembed_param_mult=0.5,
-            unembed_grad=0.5
-        )
-    elif style.lower() == 'mean-field':
-        return Parameterization(
-            embed_init_var=0,
-            embed_param_mult=0,
-            embed_grad=1,
-            hidden_init_var=0,
+            unembed_lr=0.5,
+            unembed_grad=0.5,
+        ),
+        "mean-field": Parameterization(
+            embed_init_var=0.0,
+            embed_param_mult=0.0,
+            embed_lr=0.0,
+            embed_grad=1.0,
+            hidden_init_var=0.0,
             hidden_param_mult=0.5,
-            hidden_grad=3/2,
-            unembed_init_var=0,
-            unembed_param_mult=1,
-            unembed_grad=1
-        )
-    else:
+            hidden_lr=0.5,
+            hidden_grad=1.5,
+            unembed_init_var=0.0,
+            unembed_param_mult=1.0,
+            unembed_lr=0.0,
+            unembed_grad=1.0,
+        ),
+    }
+
+    style = style.lower()
+    if style not in base_params:
         raise ValueError(f"Unknown parameterization style: {style}")
+
+    params = base_params[style]._asdict()
+
+    if not fully_aligned:
+        if style == "sp":
+            params.update(
+                {
+                    "embed_lr": 0.0,
+                    "hidden_lr": 0.5,
+                    "unembed_lr": 0.5,
+                }
+            )
+        elif style == "mup":
+            params.update(
+                {
+                    "embed_lr": 0.5,
+                    "hidden_lr": 0.5,
+                    "unembed_lr": 0.0,
+                }
+            )
+        elif style == "ntk":
+            params.update(
+                {
+                    "embed_lr": 0.0,
+                    "hidden_lr": 0.0,
+                    "unembed_lr": 0.0,
+                }
+            )
+        elif style == "mean-field":
+            params.update(
+                {
+                    "embed_lr": 0.0,
+                    "hidden_lr": 0.0,
+                    "unembed_lr": -0.5,
+                }
+            )
+
+    return Parameterization(**params)
 
 
 @pytree_dataclass
@@ -167,19 +229,19 @@ class Model:
         p = get_parameterization(h.parameterization)
         base = h.base
 
-        embed_scale = (math.sqrt(base.d_model) / (h.d_model * truncated_normal_stddev)) ** (
-            p.embed_init_var
-        )
+        embed_scale = (
+            math.sqrt(base.d_model) / (h.d_model * truncated_normal_stddev)
+        ) ** (p.embed_init_var)
         # scale for tensors with d_model fan_in and truncated normal truncated to (-2, 2)
-        d_model_scale = (math.sqrt(base.d_model) / (h.d_model * truncated_normal_stddev)) ** (
-            p.hidden_init_var
-        )
+        d_model_scale = (
+            math.sqrt(base.d_model) / (h.d_model * truncated_normal_stddev)
+        ) ** (p.hidden_init_var)
         w_kv_scale = d_model_scale
         target_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
         base_head_dim = base.n_q_per_kv * base.n_kv * base.d_head
-        w_o_scale = (math.sqrt(base_head_dim) / (target_head_dim * truncated_normal_stddev)) ** (
-            p.hidden_init_var
-        )
+        w_o_scale = (
+            math.sqrt(base_head_dim) / (target_head_dim * truncated_normal_stddev)
+        ) ** (p.hidden_init_var)
         w_up_scale = d_model_scale
         w_down_scale = (math.sqrt(base.d_ff) / (h.d_ff * truncated_normal_stddev)) ** (
             p.hidden_init_var
@@ -207,9 +269,9 @@ class Model:
         w_q_scale = d_model_scale
         w_q_shape = (h.layers, h.d_model, h.n_q_per_kv, h.n_kv, h.d_head)
         w_o_shape = w_q_shape
-        unembed_scale = (math.sqrt(base.d_model) / (h.d_model * truncated_normal_stddev)) ** (
-            p.unembed_init_var
-        )
+        unembed_scale = (
+            math.sqrt(base.d_model) / (h.d_model * truncated_normal_stddev)
+        ) ** (p.unembed_init_var)
         w_o = w_o_scale * jax.random.truncated_normal(
             fold_in_str(rng, "w_o"), -2, 2, w_o_shape, dtype=jnp.float32
         )
@@ -258,7 +320,8 @@ class Model:
 
         # Initial embedding lookup.
         embed = embed_mult * shardops.all_gather(
-            "V/t M/d -> V/t M", jnp.bfloat16(self.embed))
+            "V/t M/d -> V/t M", jnp.bfloat16(self.embed)
+        )
         x = shardops.index_unreduced("[V/t] M, B/d L -> B/d L M", embed, ids)
         x = shardops.psum_scatter("B/d L M -> B/d L M/t", x)
 
@@ -273,8 +336,7 @@ class Model:
         causal_mask: bool_[b"1 L L 1 1"] = jnp.tril(
             jnp.ones((L, L), dtype=jnp.bool_), 0
         )[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
-        causal_mask: bool_[
-            b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
+        causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
 
         rope_table = RopeTable.create(L, h)
 
@@ -292,17 +354,15 @@ class Model:
             nx = jnp.bfloat16(rms_norm(gx) * ln1)
 
             # Attention, using Grouped Query Attention and RoPE position embeddings.
-            w_q = shardops.all_gather(
-                "M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_q))
+            w_q = shardops.all_gather("M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_q))
             q = save_for_backward(
-                hidden_mult *
-                shardops.einsum_unreduced(
+                hidden_mult
+                * shardops.einsum_unreduced(
                     "B/d L M, M Q K/t D -> B/d L Q K/t D", nx, w_q
                 )
             )
             q = rope_table.apply("L D -> 1 L 1 1 D", q)
-            w_kv = shardops.all_gather(
-                "2 M/d K/t D -> 2 M K/t D", jnp.bfloat16(w_kv))
+            w_kv = shardops.all_gather("2 M/d K/t D -> 2 M K/t D", jnp.bfloat16(w_kv))
             k, v = hidden_mult * shardops.einsum_unreduced(
                 "B/d L M, k_v M K/t D -> k_v B/d L K/t D", nx, w_kv
             )
@@ -313,7 +373,7 @@ class Model:
             logit_scale = jax.lax.select(
                 h.parameterization.lower() == "mup",
                 h.a_attn * math.sqrt(h.base.d_head) / h.d_head,
-                1.0 / math.sqrt(h.d_head)
+                1.0 / math.sqrt(h.d_head),
             )
             logits = logit_scale * shardops.einsum_unreduced(
                 "B/d Qlen Q K/t D, B/d Klen K/t D -> B/d Qlen Klen Q K/t",
@@ -326,39 +386,32 @@ class Model:
             attn_out = shardops.einsum_unreduced(
                 "B/d Qlen Klen Q K/t, B/d Klen K/t D -> B/d Qlen Q K/t D", probs, v
             )
-            w_o = shardops.all_gather(
-                "M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_o))
+            w_o = shardops.all_gather("M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_o))
             attn_out = hidden_mult * shardops.einsum_unreduced(
                 "B/d Qlen Q K/t D, M Q K/t D -> B/d Qlen M", attn_out, w_o
             )
-            attn_out = shardops.psum_scatter(
-                "B/d Qlen M -> B/d Qlen M/t", attn_out)
+            attn_out = shardops.psum_scatter("B/d Qlen M -> B/d Qlen M/t", attn_out)
             x = save_for_backward(x + attn_out)
 
             # Pre-FFN RMSNorm
-            ln2 = save_for_backward(shardops.all_gather(
-                "M/t/d -> M", jnp.float32(ln2)))
+            ln2 = save_for_backward(shardops.all_gather("M/t/d -> M", jnp.float32(ln2)))
             gx = shardops.all_gather("B/d L M/t -> B/d L M", x)
             nx = jnp.bfloat16(rms_norm(gx) * ln2)
 
             # FFN, using SwiGLU
-            w_gate = shardops.all_gather(
-                "M/d F/t -> M F/t", jnp.bfloat16(w_gate))
+            w_gate = shardops.all_gather("M/d F/t -> M F/t", jnp.bfloat16(w_gate))
             gate_proj = save_for_backward(
-                hidden_mult *
-                shardops.einsum_unreduced(
-                    "B/d L M, M F/t -> B/d L F/t", nx, w_gate)
+                hidden_mult
+                * shardops.einsum_unreduced("B/d L M, M F/t -> B/d L F/t", nx, w_gate)
             )
             w_up = shardops.all_gather("M/d F/t -> M F/t", jnp.bfloat16(w_up))
             up_proj = save_for_backward(
-                hidden_mult *
-                shardops.einsum_unreduced(
-                    "B/d L M, M F/t -> B/d L F/t", nx, w_up)
+                hidden_mult
+                * shardops.einsum_unreduced("B/d L M, M F/t -> B/d L F/t", nx, w_up)
             )
             y = jax.nn.swish(gate_proj) * up_proj
-            w_down = shardops.all_gather(
-                "M/d F/t -> M F/t", jnp.bfloat16(w_down))
-            
+            w_down = shardops.all_gather("M/d F/t -> M F/t", jnp.bfloat16(w_down))
+
             ffn_out_mult = (h.d_ff / h.base.d_ff) ** -p.hidden_param_mult
             ffn_out = ffn_out_mult * shardops.einsum_unreduced(
                 "B/d L F/t, M F/t -> B/d L M", y, w_down
@@ -384,8 +437,7 @@ class Model:
 
         # Final layernorm and output projection.
         x = shardops.all_gather("B/d L M/t -> B/d L M", x)
-        ln = shardops.all_gather(
-            "M/t/d -> M", jnp.float32(self.final_layer_norm))
+        ln = shardops.all_gather("M/t/d -> M", jnp.float32(self.final_layer_norm))
         x = jnp.bfloat16(rms_norm(x) * ln)
         unembed = unembed_mult * shardops.all_gather(
             "V/t M/d -> V/t M", jnp.bfloat16(self.unembed)
@@ -411,14 +463,12 @@ class Model:
         is_seq_start: bool_[b"batch/d len"] = batch.is_seq_start
         inputs: u32[b"batch/d len"] = jnp.where(is_seq_start, 0, inputs)
 
-        logits: f32[b"batch/d len V/t"] = self.forward_pass(
-            h, inputs, is_seq_start)
+        logits: f32[b"batch/d len V/t"] = self.forward_pass(h, inputs, is_seq_start)
         max_logits: f32[b"batch/d len 1"] = lax.pmax(
             jnp.max(lax.stop_gradient(logits), axis=-1, keepdims=True), "t"
         )
         logits = logits - max_logits
-        sum_logits = lax.psum(
-            jnp.sum(jnp.exp(logits), axis=-1, keepdims=True), "t")
+        sum_logits = lax.psum(jnp.sum(jnp.exp(logits), axis=-1, keepdims=True), "t")
         logsumexp = jnp.log(sum_logits)
         logprobs: f32[b"batch/d len V/t"] = logits - logsumexp
         logprobs_at_targets = shardops.index_unreduced(
@@ -427,8 +477,7 @@ class Model:
         logprobs_at_targets = shardops.psum_scatter(
             "batch/d len -> batch/d len/t", logprobs_at_targets
         )
-        tokens_in_global_batch = logprobs_at_targets.size * \
-            jax.lax.psum(1, ("d", "t"))
+        tokens_in_global_batch = logprobs_at_targets.size * jax.lax.psum(1, ("d", "t"))
         return -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch)
 
 
@@ -447,8 +496,7 @@ class RopeTable:
             0, jnp.log10(jnp.float32(rope_max_timescale)), d, endpoint=False
         )
         position = jnp.arange(max_len, dtype=jnp.int32)
-        sinusoid_inp = jnp.float32(
-            position[:, jnp.newaxis]) / timescale[jnp.newaxis, :]
+        sinusoid_inp = jnp.float32(position[:, jnp.newaxis]) / timescale[jnp.newaxis, :]
         sin = jnp.sin(sinusoid_inp)
         cos = jnp.cos(sinusoid_inp)
         return RopeTable(sin=sin, cos=cos)
@@ -552,8 +600,7 @@ def training_step(
         )
         cosine_lr = hparams.learning_rate * (
             hparams.cosine_learning_rate_final_fraction
-            + (1 - hparams.cosine_learning_rate_final_fraction) *
-            (cosine * 0.5 + 0.5)
+            + (1 - hparams.cosine_learning_rate_final_fraction) * (cosine * 0.5 + 0.5)
         )
         lr = jnp.where(step < hparams.warmup_steps, warmup_lr, cosine_lr)
 
@@ -569,10 +616,8 @@ def training_step(
         base = h.base
 
         p = get_parameterization(h.parameterization)
-        embed_lr_scale = h.gamma_embed * \
-            (h.d_model / base.d_model) ** -p.embed_grad
-        unembed_lr_scale = h.gamma_unembed * \
-            (h.d_model / base.d_model) ** -p.unembed_grad
+        embed_lr_scale = h.gamma_embed * (h.d_model / base.d_model) ** -p.embed_lr
+        unembed_lr_scale = h.gamma_unembed * (h.d_model / base.d_model) ** -p.unembed_lr
 
         target_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
         base_head_dim = base.n_q_per_kv * base.n_kv * base.d_head
@@ -582,14 +627,12 @@ def training_step(
             unembed=unembed_lr_scale,
             ln1=1.0,
             ln2=1.0,
-            w_q=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_grad,
-            w_kv=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_grad,
-            w_o=h.gamma_hidden * (target_head_dim /
-                                  base_head_dim) ** -p.hidden_grad,
-            w_gate=h.gamma_hidden *
-            (h.d_model / base.d_model) ** -p.hidden_grad,
-            w_up=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_grad,
-            w_down=h.gamma_hidden * (h.d_ff / base.d_ff) ** -p.hidden_grad,
+            w_q=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
+            w_kv=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
+            w_o=h.gamma_hidden * (target_head_dim / base_head_dim) ** -p.hidden_lr,
+            w_gate=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
+            w_up=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
+            w_down=h.gamma_hidden * (h.d_ff / base.d_ff) ** -p.hidden_lr,
             final_layer_norm=1.0,
         )
 
@@ -617,8 +660,7 @@ def training_step(
             g = g * rescale
             # Adam scaling
             mu = (1 - hparams.adam_b1) * g + hparams.adam_b1 * mu
-            nu = (1 - hparams.adam_b2) * \
-                jax.lax.square(g) + hparams.adam_b2 * nu
+            nu = (1 - hparams.adam_b2) * jax.lax.square(g) + hparams.adam_b2 * nu
             # We need step numbers to start at 1, not 0. Otherwise the bias correction produces NaN.
             completed_steps = step + 1
             mu_hat = mu / (1 - jnp.float32(hparams.adam_b1) ** completed_steps)
@@ -700,19 +742,16 @@ def main_contained(config, logger):
     # TODO: check this is true and if not, provide our own that actually is fusable.
     jax.config.update("jax_threefry_partitionable", True)
     with Mesh(
-        mesh_utils.create_device_mesh(
-            [config.mesh.d, config.mesh.t], jax.devices()),
+        mesh_utils.create_device_mesh([config.mesh.d, config.mesh.t], jax.devices()),
         ("d", "t"),
     ):
         root_rng = jax.random.PRNGKey(config.training.seed)
 
-        loader = get_loader("train", config.training_data,
-                            config.training.tokens)
+        loader = get_loader("train", config.training_data, config.training.tokens)
         assert (
             config.model.vocab > loader.max_token_id
         ), f"{config.model.vocab} vs {loader.max_token_id}"
-        config_name = hydra.core.hydra_config.HydraConfig.get()[
-            "job"]["config_name"]
+        config_name = hydra.core.hydra_config.HydraConfig.get()["job"]["config_name"]
         model_name = (
             config.paths.model_name
             if config.paths.model_name
@@ -759,8 +798,7 @@ def main_contained(config, logger):
                 training_io.start_profile()
                 profile_start = time.time()
 
-            state, output = c_training_step(
-                state, jnp.uint32(step), loader.load(step))
+            state, output = c_training_step(state, jnp.uint32(step), loader.load(step))
 
             # Run profile for two steps, to include data loading time in between them.
             if training_io.is_device_0() and step == start_step + 2:
@@ -818,8 +856,7 @@ def clear_tpu_locks():
 
 
 def get_model_name(config_name: str):
-    overrides = hydra.core.hydra_config.HydraConfig.get()[
-        "job"]["override_dirname"]
+    overrides = hydra.core.hydra_config.HydraConfig.get()["job"]["override_dirname"]
     overrides = ",".join(overrides.split(",")[1:]).replace("=", ":")
     return f"{config_name}_{overrides}" if overrides else config_name
 
@@ -828,8 +865,7 @@ def get_model_name(config_name: str):
 def main(config):
     config = jax_extra.make_dataclass_from_dict(Config, config)
     if config.training.queue:
-        config_name = hydra.core.hydra_config.HydraConfig.get()[
-            "job"]["config_name"]
+        config_name = hydra.core.hydra_config.HydraConfig.get()["job"]["config_name"]
         task_name = (
             config.paths.model_name
             if config.paths.model_name

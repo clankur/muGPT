@@ -238,20 +238,24 @@ class Model:
 
             # Sparse K selection as outlined in: https://arxiv.org/pdf/2406.16747
             # scoring kv pairs
+            # i is the sequence in x (arange represents i), epsilon is a small positive scalar
+            d_u = jnp.arange(L) * h.epsilon
             u = shardops.einsum_unreduced(
                 "B/d L M, M -> B/d L", nx, w_score
-            )  # TODO: add d_u = i * epsilon
-            # i is the sequence in x, epsilon is a small positive scalar
+            ) + d_u
 
             # apply selections and use their masks to select what pairs remain in K, V
-            # m_sparse_k =  sparse_k(u)
+            # m_sparse_k = sparse_k(u)
             # m_top_k = top_k(u)
 
-            # delta_hard = m_top_k mask
-            # delta_soft = m_sparse_k mask
+            _, m_top_k_indices = jax.lax.top_k(u, k=n_top_k)
+            delta_hard = jax.nn.one_hot(m_top_k_indices, u.shape[-1])
 
-            # k, v = mask only i's kept in selection
+            # delta_soft = m_sparse_k mask
+            
             # 3.5 mentions using delta_hard for K, delta_soft for V
+            k = shardops.einsum_unreduced("B/d L K/t D, B/d top_k L -> B/d top_k K/t D", k, delta_hard)
+            v = shardops.einsum_unreduced("B/d L K/t D, B/d top_k L -> B/d top_k K/t D", k, delta_soft)
 
             logit_scale = h.a_attn * math.sqrt(h.base.d_head) / h.d_head
             logits = logit_scale * shardops.einsum_unreduced(
@@ -404,6 +408,24 @@ def rms_norm(x: bf16[b"batch/d len M"]) -> bf16[b"batch/d len M"]:
         jnp.mean(jax.lax.square(jnp.float32(x)), axis=-1, keepdims=True)
     )
     return jnp.bfloat16(x * jax.lax.rsqrt(mean2 + 1e-6))
+
+def sparse_k (z: bf16[b"batch/d len"], n_top_k: int) -> bf16[b"batch/d n_top_k len"]:
+    z = jnp.sort(z, axis=-1, descending=True)
+    cumsum_z = jnp.cumsum(z, axis=-1)
+
+    u = jnp.cumsum(z == 1, axis=-1)
+    w = jnp.cumsum(z != 0, axis=-1)
+    tau = (cumsum_z - n_top_k + u) / (w-u) # missing u and w
+    mask = z > tau 
+    
+    # number of elements in cumsum for tau_star 
+    last_tao_index = jnp.sum(mask, axis=-1,keepdims=True)
+
+    tau_star = (cumsum_z[last_tao_index - 1] - n_top_k) / last_tao_index 
+    tau_star
+
+    p_star = jnp.maximum(jnp.minimum(z - tau, 1.0), 0.0))
+    return p_star
 
 
 @pytree_dataclass

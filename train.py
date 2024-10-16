@@ -358,6 +358,7 @@ class Model:
             y = jax.nn.swish(gate_proj) * up_proj
             w_down = shardops.all_gather(
                 "M/d F/t -> M F/t", jnp.bfloat16(w_down))
+            
             ffn_out_mult = (h.d_ff / h.base.d_ff) ** -p.hidden_param_mult
             ffn_out = ffn_out_mult * shardops.einsum_unreduced(
                 "B/d L F/t, M F/t -> B/d L M", y, w_down

@@ -38,6 +38,7 @@ model:
     d_head: 64
     d_ff: 2048
   parameterization: "sp" 
+  fully_aligned: false
   gamma_embed: 6.2539770944178406
   gamma_hidden: 1.4848467942851378 
   gamma_unembed: 1.4897826620883678

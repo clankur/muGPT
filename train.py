@@ -623,23 +623,6 @@ def training_step(
         target_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
         base_head_dim = base.n_q_per_kv * base.n_kv * base.d_head
 
-        embed_grad_scale = (h.d_model / base.d_model) ** -p.embed_grad
-        unembed_grad_scale = (h.d_model / base.d_model) ** -p.unembed_grad
-
-        grad_scales = Model(
-            embed=embed_grad_scale,
-            unembed=unembed_grad_scale,
-            ln1=1.0,
-            ln2=1.0,
-            w_q=(h.d_model / base.d_model) ** -p.hidden_grad,
-            w_kv=(h.d_model / base.d_model) ** -p.hidden_grad,
-            w_o=(target_head_dim / base_head_dim) ** -p.hidden_grad,
-            w_gate=(h.d_model / base.d_model) ** -p.hidden_grad,
-            w_up=(h.d_model / base.d_model) ** -p.hidden_grad,
-            w_down=(h.d_ff / base.d_ff) ** -p.hidden_grad,
-            final_layer_norm=1.0,
-        )
-
         embed_lr_scale = h.gamma_embed * (h.d_model / base.d_model) ** -p.embed_lr
         unembed_lr_scale = h.gamma_unembed * (h.d_model / base.d_model) ** -p.unembed_lr
 
@@ -673,13 +656,12 @@ def training_step(
             tree_leaves(state.adam_nu),
             tree_leaves(shardtypes.make_partition_specs(State)),
             tree_leaves(lr_scales),
-            tree_leaves(grad_scales),
         ):
             assert shardtypes.is_fully_sharded(
                 spec
             ), "Weight update is only correctly scaled for fully sharded weights."
             # Gradient clipping
-            g = g * rescale * g_scale
+            g = g * rescale
             # Adam scaling
             mu = (1 - hparams.adam_b1) * g + hparams.adam_b1 * mu
             nu = (1 - hparams.adam_b2) * jax.lax.square(g) + hparams.adam_b2 * nu

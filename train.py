@@ -649,7 +649,7 @@ def training_step(
         new_ps = []
         new_mus = []
         new_nus = []
-        for p, g, mu, nu, spec, lr_scale, g_scale in zip(
+        for p, g, mu, nu, spec, lr_scale in zip(
             tree_leaves(state.weights),
             grad_leaves,
             tree_leaves(state.adam_mu),

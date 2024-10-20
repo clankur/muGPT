@@ -1,4 +1,4 @@
-# python -m train --config-name=c4_a100x8x4_37m +paths.model_name=270m
+# python -m train --config-name=c4_a100x8x4_37m +paths.model_name=37m
 defaults:
 - c4_a100x8_base
 - _self_
@@ -29,8 +29,8 @@ model:
   rope_max_timescale: 10000
   a_attn: 1.
   a_output: 1.
-  zero_queries: false 
-  zero_unembed: false 
+  zero_queries: true
+  zero_unembed: true 
   base:
     d_model: 256 
     n_q_per_kv: 1

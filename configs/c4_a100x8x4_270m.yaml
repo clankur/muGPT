@@ -16,6 +16,7 @@ training:
   learning_rate: 8.0e-4
   tokens:
     batch: 256
+  use_grad_clip: true
 
 model:
   d_model: 1024
@@ -28,8 +29,8 @@ model:
   rope_max_timescale: 10000
   a_attn: 1.
   a_output: 1.
-  zero_queries: false 
-  zero_unembed: false 
+  zero_queries: true
+  zero_unembed: true 
   base:
     d_model: 1024
     n_q_per_kv: 1
@@ -37,5 +38,9 @@ model:
     d_head: 128
     d_ff: 8192
   parameterization: "sp"
-    
+  fully_aligned: false
+  gamma_embed: 1.
+  gamma_hidden: 1. 
+  gamma_unembed: 1.
+   
 checkpoint_interval: 9200

@@ -34,6 +34,7 @@ model:
     d_head: 32
     d_ff: 1024
   parameterization: "sp" 
+  fully_aligned: false
   gamma_embed: 1. 
   gamma_hidden: 1. 
   gamma_unembed: 1. 

@@ -1,4 +1,4 @@
-# Benchmarking Exponent Scaling
+# Benchmarking learning rate transfer
 
 Recently, [Everett et al.](https://arxiv.org/pdf/2407.05872v2)  found that applying per layer learning rate prescription can enable hyperparameter transfer for other parameterization strategies besides muP and actually found that applying it to standard parameterization (SP) outperforms muP. I am attempting in reproducing this results and determining the limits of extensibility.
 
@@ -16,14 +16,14 @@ To verify the findings I performed parameter scaling from a 37m base up to 1b mo
 
 ### Alternative parameterization approaches
 
-Currently, I've only written an implementation of exponent scaling for SP and muP, though I have yet to benchmark the performance of applying per-layer learning rates to muP. Future work would include assessing its performance and also benchmarking NTK parameterizations's performance as Everett et al. found that the best model when applying per-layer “no alignment”.
+While I've only implemented exponent scaling for SP and muP so far, future work would include implementing NTK and benchmarking its parameterizations' performance, as Everett et al. found that it was the best model when applying per-layer unaligned exponents.
 
 ### Alignment
 
-One of the findings in the paper that might also be worth investigating is the influence of alignment as they mention that unaligned exponents enables modest performance of models, the exponents do not appear to capture the learning rate scaling behavior as well as the fully-aligned exponents since the power law exponents are not close to zero. They also caution that the influence of the exponent's alignment may vary per use case.
+One of the findings in the paper that might also be worth investigating is the influence of alignment as they mention that models with unaligned exponents achieve a lower loss, but the exponents do not appear to capture the learning rate scaling behavior as well as the fully-aligned exponents since the power law exponents are not close to zero. They also caution that the influence of the exponent's alignment may vary per use case.
 
 So far I have only performed parameter scaling with fully aligned exponents, but in future runs I would run experiments to either verify the performance gains observed in the paper or verify their note that the type alignments may matter per use case.
 
 ### Limits to parameter scaling
 
-For both muP and exponent scaling, I observed their were some performance degradation depending on the selected base model, as a 13m base model **[need to quantify this]** underperformed the benchmark SP model with no scaling when performing parameter scaling to 270m BUT a 37m base model was able to outperform the same benchmark model.
+For both muP and exponent scaling, I observed their were some performance degradation depending on the selected base model, as a 13m base model with head dimension of 32 **[need to quantify this]** underperformed the benchmark SP model with no scaling when performing parameter scaling to 270m BUT a 37m base model with a head dimension of 64 was able to outperform the same benchmark model. Based on these findings, it appears that for parameter transfer to be scalable the minimum head dimension needs to be 64.

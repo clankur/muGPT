@@ -1,6 +1,6 @@
 # Benchmarking Learning Rate Transfer
 
-Recently, [Everett et al.](https://arxiv.org/pdf/2407.05872v2)  found that applying per layer learning rate prescription can enable hyperparameter transfer for other parameterization strategies besides muP and actually found that applying it to standard parameterization (SP) outperforms muP. I am attempting in reproducing this results and determining the limits of extensibility.
+Recently, [Everett et al.](https://arxiv.org/pdf/2407.05872v2)  found that applying per layer learning rate prescription can enable hyperparameter transfer for other parameterization strategies besides muP and actually found that applying it to standard parameterization (SP) outperforms muP. I am attempting to reproduce their findings and determining the limits of its extensibility.
 
 ## Experiments
 
@@ -13,7 +13,7 @@ For reference I used the following settings for my base models:
 - [13m base fully aligned exponent scaling](https://github.com/clankur/muGPT/blob/526bc268907b0aadc86bef5aea8ff65df562f20b/configs/c4_a100x8x4_13m.yaml)
 - [37m base fully aligned exponent scaling](https://github.com/clankur/muGPT/blob/526bc268907b0aadc86bef5aea8ff65df562f20b/configs/c4_a100x8x4_37m.yaml)
 
-and applied parameter transfer to [270m](https://github.com/clankur/muGPT/blob/526bc268907b0aadc86bef5aea8ff65df562f20b/configs/c4_a100x8x4_270m.yaml) and [1b](https://github.com/clankur/muGPT/blob/526bc268907b0aadc86bef5aea8ff65df562f20b/configs/c4_a100x8x4_1b.yaml) models. Note these are using their own tuned gammas from an hyperparameter optimization instead of using their default values of 1.
+and applied parameter transfer to [270m](https://github.com/clankur/muGPT/blob/526bc268907b0aadc86bef5aea8ff65df562f20b/configs/c4_a100x8x4_270m.yaml) and [1b](https://github.com/clankur/muGPT/blob/526bc268907b0aadc86bef5aea8ff65df562f20b/configs/c4_a100x8x4_1b.yaml) models. Note these are using their own tuned gammas from an hyperparameter optimization instead of using their default values of 1 and are applying zero initialization for the queries and unembeddings - as muP found that this adjustment enables performance gains and I've noted this as something that can be applied to even SP models.
 
 ### Findings
 
@@ -37,7 +37,7 @@ While I've only implemented exponent scaling for SP and muP, future work would i
 
 ### Alignment
 
-The paper observes that models with unaligned exponents achieve a lower loss, but also come with a caveat: but the exponents do not appear to capture the learning rate scaling behavior as well as the fully-aligned exponents since the power law exponents are not close to zero. Everett et al. note that while exponent alignment choices may vary by use case, they conclude that unaligned exponents are generally preferable. They support this by stating that they found fully-aligned exponents have higher learning rate sensitivity, poor constant multiplier transfer, and a performance gap between unaligned exponents that only grows with scale.
+The paper observes that models with unaligned exponents achieve a lower loss, but also come with a caveat: the exponents do not appear to capture the learning rate scaling behavior as well as the fully-aligned exponents since the power law exponents are not close to zero. Everett et al. note that while exponent alignment choices may vary by use case, they conclude that unaligned exponents are generally preferable. They support this by stating that they found fully-aligned exponents have higher learning rate sensitivity, poor constant multiplier transfer, and a performance gap between unaligned exponents that only grows with scale.
 
 As a part of a next round of experiments, I would want to get a better understanding the influence of alignment. So far I have only performed parameter scaling with fully aligned exponents, but in future runs I would run experiments to either verify the performance gains observed in the paper or verify their note that the type alignments may matter per use case and narrow down patterns of what they might be.
 

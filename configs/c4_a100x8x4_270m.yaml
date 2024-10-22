@@ -13,9 +13,10 @@ training:
   warmup_steps: 2300
   steps:        23000
   steps_for_lr: 23000
-  learning_rate: 7.3e-3
+  learning_rate: 8.0e-4
   tokens:
     batch: 256
+  use_grad_clip: true
 
 model:
   d_model: 1024
@@ -31,11 +32,10 @@ model:
   zero_queries: true
   zero_unembed: true
   base:
-    d_model: 256 
+    d_model: 1024
     n_q_per_kv: 1
-    n_kv: 16 
-    d_head: 64 
-    layers: 8
-    d_ff: 2048
+    n_kv: 16
+    d_head: 128
+    d_ff: 8192
   
 checkpoint_interval: 9200

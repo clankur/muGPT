@@ -36,7 +36,6 @@ model:
     n_q_per_kv: 1
     n_kv: 16
     d_head: 128
-    layers: 8
     d_ff: 16384
 
 checkpoint_interval: 2500

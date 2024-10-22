@@ -32,7 +32,6 @@ model:
     n_q_per_kv: 2
     n_kv: 2
     d_head: 32
-    layers: 2
     d_ff: 1024
 
 paths:

@@ -13,21 +13,21 @@ For reference I used the following settings for my base models:
 - [13m base fully aligned exponent scaling](https://github.com/clankur/muGPT/blob/526bc268907b0aadc86bef5aea8ff65df562f20b/configs/c4_a100x8x4_13m.yaml)
 - [37m base fully aligned exponent scaling](https://github.com/clankur/muGPT/blob/526bc268907b0aadc86bef5aea8ff65df562f20b/configs/c4_a100x8x4_37m.yaml)
 
-and applied parameter transfer to [270m](https://github.com/clankur/muGPT/blob/526bc268907b0aadc86bef5aea8ff65df562f20b/configs/c4_a100x8x4_270m.yaml) and [1b](https://github.com/clankur/muGPT/blob/526bc268907b0aadc86bef5aea8ff65df562f20b/configs/c4_a100x8x4_1b.yaml) models. Note these are using their own tuned gammas from an hyperparameter optimization instead of using their default values of 1 and are applying zero initialization for the queries and unembeddings - as muP found that this adjustment enables performance gains and I've noted this as something that can be applied to even SP models.
+and applied parameter transfer to [270m](https://github.com/clankur/muGPT/blob/526bc268907b0aadc86bef5aea8ff65df562f20b/configs/c4_a100x8x4_270m.yaml) and [1b](https://github.com/clankur/muGPT/blob/526bc268907b0aadc86bef5aea8ff65df562f20b/configs/c4_a100x8x4_1b.yaml) models. Note these are using their own tuned gammas from an hyperparameter optimization instead of using their default values of 1 and are applying zero initialization for the queries and unembeddings - as muP found that this adjustment enables performance gains and I've noted this as something that can be applied to even SP models. Our implementation of exponent scaling also used the modification for Adam, the paper coins as Adamatan2 that removes the need for epsilon entirely.
 
 ### Findings
+
+For 270m, appling parameter scaling with fully aligned exponent consistently was performing better than the other implementation of the 270m model, significantly outperforming the baseline SP implemented without parameter scaling, and achieving a slightly lower loss than the muP implementation.
 
 ![270m model comparsion](images/270m_loss.png)
 [270m SP with tuned LR vs 270m muP transfer with 37m base vs 270m parameter transfer using SP with 37m base and fully aligned exponents](https://app.clear.ml/projects/c6c821d0a24e402eb4879dbe3ce93e2b/compare-experiments;ids=df7e20341b944c7685fcc054975aa21c,b85c64948d2747799e141fe99d41efa8,1151de73c92c49baaa612fd2a1567ed8/scalars/graph)
 
-For 270m, appling parameter scaling with fully aligned exponent consistently was performing better than the other implementation of the 270m model, significantly outperforming the baseline SP implemented without parameter scaling, and achieving a slightly lower loss than the muP implementation.
+On the otherhand, with 1B we see both parameter scaling approaches only start outperforming the baseline SP in the last 10k steps - indicating this stage of training enables the parameter scaling models to learn critical features that improve its loss. We still observe that fully aligned exponent scaling outperform the baselines, substantiating the findings by Everett et al.
 
 ![1b model comparsion](images/1b_loss.png)
 [1b SP with tuned LR vs 1b muP transfer with 37m base vs 1b parameter transfer using SP with 37m base and fully aligned exponents](https://app.clear.ml/projects/*/compare-experiments;ids=b9044d8fd148453ab592d8839615f78f,95b1306d3bf243a4a601d41f2fd40760,8ba8cdbca4094bab8a458e9416fc97be/scalars/graph)
 
-On the otherhand, with 1B we see both parameter scaling approaches only start outperforming the baseline SP in the last 10k steps - indicating this stage of training enables the parameter scaling models to learn critical features that improve its loss. We still observe that fully aligned exponent scaling outperform the baselines, substantiating the findings by Everett et al.
-
-**Note** to view interactive plots of their loss from ClearML you will *need* to create an account with ClearML.
+**Note** to view interactive plots of their model's metrics including loss from ClearML you will **need** to create an account with ClearML.
 
 ## Pending questions
 

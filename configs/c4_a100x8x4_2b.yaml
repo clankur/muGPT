@@ -37,5 +37,10 @@ model:
     n_kv: 16
     d_head: 128
     d_ff: 16384
+  parameterization: "sp"
+  fully_aligned: false
+  gamma_embed: 1.
+  gamma_hidden: 1. 
+  gamma_unembed: 1.
 
 checkpoint_interval: 2500

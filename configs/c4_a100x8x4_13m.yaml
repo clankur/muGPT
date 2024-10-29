@@ -29,8 +29,8 @@ model:
   rope_max_timescale: 10000
   a_attn: 1.
   a_output: 1.
-  zero_queries: true 
-  zero_unembed: true 
+  zero_queries: true
+  zero_unembed: true
   base:
     d_model: 128
     n_q_per_kv: 1

@@ -30,7 +30,7 @@ model:
   a_attn: 1.
   a_output: 1.
   zero_queries: true
-  zero_unembed: true 
+  zero_unembed: true
   base:
     d_model: 256 
     n_q_per_kv: 1

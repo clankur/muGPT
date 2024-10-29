@@ -1,7 +1,7 @@
 # Benchmarking Learning Rate Transfer
 
-[Yang et al.](https://arxiv.org/pdf/2203.03466) demonstrated muP parameter transfer's effectiveness in scaling hyperparameters from base models to larger variants, reducing the total FLOPs needed to train these models. Recently, [Everett et al.](https://arxiv.org/pdf/2407.05872v2) found that applying a per layer learning rate prescription enables hyperparameter transfer beyond muP, with standard parameterization (SP) outperforming muP. This work attempts to reproduce their findings and explore its limits.
-
+[Yang et al.](https://arxiv.org/pdf/2203.03466) demonstrated muP parameter transfer's effectiveness in scaling hyperparameters from base models to larger variants, reducing the total FLOPs needed to train these models. Recently, [Everett et al.](https://arxiv.org/pdf/2407.05872v2) identified techiniques to enable hyperparameter transfer to other parameterizations. This work attempts to reproduce their findings and explore its limits.
+  
 ## Experiments
 
 I performed parameter scaling from 13m and 37m base models up to 1b models, comparing against SP without parameter scaling and muP baselines.

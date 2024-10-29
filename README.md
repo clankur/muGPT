@@ -1,6 +1,6 @@
 # mugpt
 
-mugpt is a fork of [seqax by MatX](https://github.com/MatX-inc/seqax) modified to run on Google's TPU v4-32s and uses the hyperparameter transfer described by [Everett et al.](https://arxiv.org/pdf/2407.05872v2). Previously, I experimented with a modified form of attention "SharedKV" which resides in the [sharedkv branch](https://github.com/clankur/mugpt/tree/shared_kv) and mu-parameter transfer described by [Yang et al](https://arxiv.org/pdf/2203.03466). For more information on these investigations, take a look here:
+mugpt is a fork of [seqax by MatX](https://github.com/MatX-inc/seqax) modified to run on Google's TPU v4-32s and uses the hyperparameter transfer described by [Everett et al.](https://arxiv.org/pdf/2407.05872v2) Previously, I experimented with a modified form of attention "SharedKV" which resides in the [sharedkv branch](https://github.com/clankur/mugpt/tree/shared_kv) as well as mu-parameter transfer described by [Yang et al.](https://arxiv.org/pdf/2203.03466) For more information on these investigations, take a look here:
 
 - [Benchmarking Learning Rate Transfer](./docs/exp_scaling.md)
 - [Minimizing HBM usage through SharedKV](./docs/sharedkv.md)

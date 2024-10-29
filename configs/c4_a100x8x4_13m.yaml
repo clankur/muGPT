@@ -16,6 +16,7 @@ training:
   learning_rate: 3.0e-2
   tokens:
     batch: 256
+  use_grad_clip: true
 
 model:
   d_model: 128
@@ -36,5 +37,10 @@ model:
     n_kv: 16 
     d_head: 32 
     d_ff: 1024 
-  
+  parameterization: "sp" 
+  fully_aligned: false
+  gamma_embed: 0.24208930452006025 
+  gamma_hidden: 0.8381750357690096 
+  gamma_unembed: 0.40928648131713624 
+
 checkpoint_interval: 9200

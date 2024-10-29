@@ -68,6 +68,7 @@ class Hparams:
     vocab: int
     d_ff: int
     rope_max_timescale: int
+    norm_eps: float
 
     base: BaseWidths
     # parameters for mup
@@ -210,9 +211,9 @@ class Model:
     unembed: f32["vocab/t d_model/d"]
     ln1: f32["layers d_model/t/d"]
     ln2: f32["layers d_model/t/d"]
-    w_q: f32["layers d_model/d n_q_per_kv n_kv/t d_head"]
+    w_q: f32["layers d_model/d n_kv/t n_q_per_kv d_head"]
     w_kv: f32["layers 2 d_model/d n_kv/t d_head"]
-    w_o: f32["layers d_model/d n_q_per_kv n_kv/t d_head"]
+    w_o: f32["layers d_model/d n_kv/t n_q_per_kv d_head"]
     w_gate: f32["layers d_model/d d_ff/t"]
     w_up: f32["layers d_model/d d_ff/t"]
     w_down: f32["layers d_model/d d_ff/t"]
@@ -271,7 +272,7 @@ class Model:
         )
 
         w_q_scale = d_model_scale
-        w_q_shape = (h.layers, h.d_model, h.n_q_per_kv, h.n_kv, h.d_head)
+        w_q_shape = (h.layers, h.d_model, h.n_kv, h.n_q_per_kv, h.d_head)
         w_o_shape = w_q_shape
         unembed_scale = (
             math.sqrt(base.d_model) / (h.d_model * truncated_normal_stddev)
@@ -355,14 +356,14 @@ class Model:
             # Pre-attention RMSNorm
             ln1 = shardops.all_gather("M/t/d -> M", jnp.float32(ln1))
             gx = shardops.all_gather("B/d L M/t -> B/d L M", x)
-            nx = jnp.bfloat16(rms_norm(gx) * ln1)
+            nx = jnp.bfloat16(rms_norm(gx, h.norm_eps) * ln1)
 
             # Attention, using Grouped Query Attention and RoPE position embeddings.
-            w_q = shardops.all_gather("M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_q))
+            w_q = shardops.all_gather("M/d K/t Q D -> M K/t Q D", jnp.bfloat16(w_q))
             q = save_for_backward(
                 hidden_mult
                 * shardops.einsum_unreduced(
-                    "B/d L M, M Q K/t D -> B/d L Q K/t D", nx, w_q
+                    "B/d L M, M K/t Q D -> B/d L K/t Q D", nx, w_q
                 )
             )
             q = rope_table.apply("L D -> 1 L 1 1 D", q)
@@ -380,7 +381,7 @@ class Model:
                 1.0 / math.sqrt(h.d_head),
             )
             logits = logit_scale * shardops.einsum_unreduced(
-                "B/d Qlen Q K/t D, B/d Klen K/t D -> B/d Qlen Klen Q K/t",
+                "B/d Qlen K/t Q D, B/d Klen K/t D -> B/d Qlen Klen K/t Q",
                 q,
                 k,
                 preferred_element_type=jnp.float32,
@@ -388,11 +389,11 @@ class Model:
             logits = jnp.where(causal_mask, logits, -1e10)
             probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
             attn_out = shardops.einsum_unreduced(
-                "B/d Qlen Klen Q K/t, B/d Klen K/t D -> B/d Qlen Q K/t D", probs, v
+                "B/d Qlen Klen K/t Q, B/d Klen K/t D -> B/d Qlen K/t Q D", probs, v
             )
-            w_o = shardops.all_gather("M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_o))
+            w_o = shardops.all_gather("M/d K/t Q D -> M K/t Q D", jnp.bfloat16(w_o))
             attn_out = hidden_mult * shardops.einsum_unreduced(
-                "B/d Qlen Q K/t D, M Q K/t D -> B/d Qlen M", attn_out, w_o
+                "B/d Qlen K/t Q D, M K/t Q D -> B/d Qlen M", attn_out, w_o
             )
             attn_out = shardops.psum_scatter("B/d Qlen M -> B/d Qlen M/t", attn_out)
             x = save_for_backward(x + attn_out)
@@ -400,7 +401,7 @@ class Model:
             # Pre-FFN RMSNorm
             ln2 = save_for_backward(shardops.all_gather("M/t/d -> M", jnp.float32(ln2)))
             gx = shardops.all_gather("B/d L M/t -> B/d L M", x)
-            nx = jnp.bfloat16(rms_norm(gx) * ln2)
+            nx = jnp.bfloat16(rms_norm(gx, h.norm_eps) * ln2)
 
             # FFN, using SwiGLU
             w_gate = shardops.all_gather("M/d F/t -> M F/t", jnp.bfloat16(w_gate))
@@ -442,7 +443,7 @@ class Model:
         # Final layernorm and output projection.
         x = shardops.all_gather("B/d L M/t -> B/d L M", x)
         ln = shardops.all_gather("M/t/d -> M", jnp.float32(self.final_layer_norm))
-        x = jnp.bfloat16(rms_norm(x) * ln)
+        x = jnp.bfloat16(rms_norm(x, h.norm_eps) * ln)
         unembed = unembed_mult * shardops.all_gather(
             "V/t M/d -> V/t M", jnp.bfloat16(self.unembed)
         )
@@ -515,11 +516,11 @@ class RopeTable:
 
 
 @typechecked
-def rms_norm(x: bf16[b"batch/d len M"]) -> bf16[b"batch/d len M"]:
+def rms_norm(x: bf16[b"batch/d len M"], norm_eps: float) -> bf16[b"batch/d len M"]:
     mean2 = save_for_backward(
         jnp.mean(jax.lax.square(jnp.float32(x)), axis=-1, keepdims=True)
     )
-    return jnp.bfloat16(x * jax.lax.rsqrt(mean2 + 1e-6))
+    return jnp.bfloat16(x * jax.lax.rsqrt(mean2 + norm_eps))
 
 
 @pytree_dataclass

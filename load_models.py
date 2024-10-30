@@ -22,9 +22,7 @@ weights = torch.load(
 params
 
 # %%
-hidden_dim = 4 * params["dim"]
-hidden_dim = int(2 * hidden_dim / 3)
-hidden_dim = int(params["ffn_dim_multiplier"] * hidden_dim)
+hidden_dim = int(8 * params["dim"] // 3 * params["ffn_dim_multiplier"])
 hidden_dim = params["multiple_of"] * (
     (hidden_dim + params["multiple_of"] - 1) // params["multiple_of"]
 )

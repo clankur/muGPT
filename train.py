@@ -67,6 +67,7 @@ class Hparams:
     layers: int
     vocab: int
     d_ff: int
+    use_scaled_rope: bool
     rope_max_timescale: int
     norm_eps: float
 
@@ -488,31 +489,72 @@ class Model:
 
 @pytree_dataclass
 class RopeTable:
-    sin: f32["len d_head2"]
-    cos: f32["len d_head2"]
+    timescale: f32["len d_head2"]
 
     @staticmethod
     def create(max_len: int, hparams: Hparams) -> "RopeTable":
         rope_max_timescale = hparams.rope_max_timescale
         d_head = hparams.d_head
         d = d_head // 2
-        # endpoint=False is equivalent to what MaxText does. endpoint=True would be more natural, though.
-        timescale = jnp.logspace(
-            0, jnp.log10(jnp.float32(rope_max_timescale)), d, endpoint=False
+        fraction = jnp.arange(0, d_head, 2)[:(d)] / d_head
+        timescale = rope_max_timescale**fraction
+        position = jnp.arange(max_len, dtype=jnp.float32)
+
+        if hparams.use_scaled_rope:
+            timescale = jax.vmap(RopeTable._apply_scaling_factor)(1.0 / timescale)
+        sinusoid_inp = jnp.outer(position, timescale)
+
+        timescale = jnp.ones_like(sinusoid_inp) * (
+            jnp.cos(sinusoid_inp) + 1j * jnp.sin(sinusoid_inp)
         )
-        position = jnp.arange(max_len, dtype=jnp.int32)
-        sinusoid_inp = jnp.float32(position[:, jnp.newaxis]) / timescale[jnp.newaxis, :]
-        sin = jnp.sin(sinusoid_inp)
-        cos = jnp.cos(sinusoid_inp)
-        return RopeTable(sin=sin, cos=cos)
+        return RopeTable(timescale)
+
+    @staticmethod
+    def _apply_scaling_factor(freq):
+        # cleaner implementation from maxtext that doesn't require building a list:
+        # https://github.com/AI-Hypercomputer/maxtext/blob/54135f84741728e05fa69950cb70d3d2b1496950/MaxText/layers/embeddings.py#L184-L209
+
+        scale_factor = 8
+        low_freq_factor = 1
+        high_freq_factor = 4
+        old_context_len = 8192  # original llama3 length
+
+        low_freq_wavelen = old_context_len / low_freq_factor
+        high_freq_wavelen = old_context_len / high_freq_factor
+        wavelen = 2 * jnp.pi / freq
+
+        def lower_wavelen(freq):
+            return freq
+
+        def bigger_or_equal_wavelen(freq):
+            def bigger_wavelen(freq):
+                return freq / scale_factor
+
+            def equal_wavelen(freq):
+                smooth = (old_context_len / wavelen - low_freq_factor) / (
+                    high_freq_factor - low_freq_factor
+                )
+                return (1 - smooth) * freq / scale_factor + smooth * freq
+
+            bigger_wavelen_cond = wavelen > low_freq_wavelen
+            return jax.lax.cond(
+                bigger_wavelen_cond, bigger_wavelen, equal_wavelen, freq
+            )
+
+        lower_wavelen_cond = wavelen < high_freq_wavelen
+        return jax.lax.cond(
+            lower_wavelen_cond, lower_wavelen, bigger_or_equal_wavelen, freq
+        )
 
     def apply(self, rearrange_spec, x):
-        x1, x2 = jnp.split(x, 2, axis=-1)
-        sin = einops.rearrange(self.sin, rearrange_spec)
-        cos = einops.rearrange(self.cos, rearrange_spec)
-        r1 = x1 * cos - x2 * sin
-        r2 = x2 * cos + x1 * sin
-        return jnp.append(r1, r2, axis=-1)
+        x_complex = jnp.reshape(x.astype(jnp.float32), (*x.shape[:-1], -1, 2))
+
+        x_complex = x_complex[..., 0] + x_complex[..., 1] * 1j
+        timescale = einops.rearrange(self.timescale[: x.shape[1]], rearrange_spec)
+
+        x_out = x_complex * timescale
+        x_out = jnp.stack([jnp.real(x_out), jnp.imag(x_out)], axis=-1).astype(x.dtype)
+        return jnp.reshape(x_out, (*x_out.shape[:-2], -1)).astype(x)
 
 
 @typechecked

@@ -10,7 +10,7 @@ import json
 import os
 from importlib import reload
 from typing import Optional
-from train import Hparams
+from train import Hparams, BaseWidths
 
 # %%
 model_path = os.path.expanduser("~/.llama/checkpoints/Llama3.2-1B/")
@@ -27,6 +27,14 @@ hidden_dim = params["multiple_of"] * (
     (hidden_dim + params["multiple_of"] - 1) // params["multiple_of"]
 )
 
+base = BaseWidths(
+    d_model=params["dim"],
+    n_q_per_kv=params["n_heads"] // params["n_kv_heads"],
+    n_kv=params["n_kv_heads"],
+    d_head=params["dim"] // params["n_heads"],
+    d_ff=hidden_dim,
+)
+
 h = Hparams(
     d_model=params["dim"],
     n_q_per_kv=params["n_heads"] // params["n_kv_heads"],
@@ -36,9 +44,19 @@ h = Hparams(
     vocab=params["vocab_size"],
     d_ff=hidden_dim,
     rope_max_timescale=params["rope_theta"],
-    # TODO: add to Hparams
     norm_eps=params["norm_eps"],
-    use_scale=params["use_scaled_rope"],
+    use_scaled_rope=params["use_scaled_rope"],
+    # default other parameters from exp scaling/muP
+    base=base,
+    a_attn=1.0,
+    a_output=1.0,
+    zero_queries=False,
+    zero_unembed=False,
+    parameterization="sp",
+    fully_aligned=False,
+    gamma_embed=1.0,
+    gamma_hidden=1.0,
+    gamma_unembed=1.0,
 )
 
 
@@ -160,3 +178,6 @@ def load_llama(weights, h: Hparams):
         mlp_downs,
         final_norm,
     )
+
+
+# %%

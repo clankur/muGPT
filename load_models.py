@@ -1,6 +1,8 @@
 # %%
+import numpy as np
 import torch
 import jax
+from jax import lax
 import jax.numpy as jnp
 from dlpack import asdlpack
 from einops import rearrange
@@ -8,6 +10,13 @@ import json
 import os
 from train import Hparams, BaseWidths, Model, State
 from typing import Tuple
+from jax.sharding import Mesh
+from jax.experimental import mesh_utils
+from shardlib.shardtypes import u32, bool_, f32, make_shardings
+
+os.environ["XLA_FLAGS"] = (
+    "--xla_force_host_platform_device_count=8"  # Use 8 CPU devices
+)
 
 
 # %%
@@ -58,7 +67,7 @@ def load_model_weights_and_hparams(model_path: str) -> Tuple[dict, Hparams]:
 
 
 # %%
-def load_llama(weights: dict, h: Hparams) -> State:
+def load_llama(weights: dict, h: Hparams) -> Model:
     pre_attention_norms = []
     pre_ffw_norms = []
     attn_qs = []
@@ -161,7 +170,7 @@ def load_llama(weights: dict, h: Hparams) -> State:
     mlp_ups = jnp.stack(mlp_ups, axis=0)
     mlp_downs = jnp.stack(mlp_downs, axis=0)
 
-    weights = Model(
+    model = Model(
         embed=embed,
         unembed=unembed,
         ln1=pre_attention_norms,
@@ -174,14 +183,28 @@ def load_llama(weights: dict, h: Hparams) -> State:
         w_down=mlp_downs,
         final_layer_norm=final_norm,
     )
-    adam_mu = jax.tree.map(lambda p: p * 0.0, weights)
-    adam_nu = jax.tree.map(lambda p: p * 0.0, weights)
-    return State(weights=weights, adam_mu=adam_mu, adam_nu=adam_nu)
+    return model
 
 
 # %%
 model_path = os.path.expanduser("~/.llama/checkpoints/Llama3.2-1B/")
-weights, h = load_model_weights_and_hparams(model_path)
-state = load_llama(weights, h)
+llama_weights, h = load_model_weights_and_hparams(model_path)
+model = load_llama(llama_weights, h)
+
+
+# %%
+with Mesh(
+    mesh_utils.create_device_mesh([1, 1], jax.devices()[:1]),
+    ("d", "t"),
+):
+    batch_size = 2
+    seq_length = 16
+
+    model = jax.tree.map(lax.with_sharding_constraint, model, make_shardings(Model))
+
+    shape = (batch_size, seq_length)
+    inputs: u32[b"batch/d len"] = jnp.zeros(shape, dtype=jnp.uint32)
+    seq_starts: bool_[b"batch/d len"] = jnp.zeros(shape, dtype=bool)
+    logits: f32[b"batch/d len V/t"] = model.forward_pass(h, inputs, seq_starts)
 
 # %%

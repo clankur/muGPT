@@ -12,7 +12,11 @@ from train import Hparams, BaseWidths, Model, State
 from typing import Tuple
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
-from shardlib.shardtypes import u32, bool_, f32, make_shardings
+from shardlib.shardtypes import u32, bool_, f32, make_shardings, register_with_typeguard
+
+register_with_typeguard()
+from input_loader import TokenBatch
+
 
 os.environ["XLA_FLAGS"] = (
     "--xla_force_host_platform_device_count=8"  # Use 8 CPU devices
@@ -189,7 +193,6 @@ def load_llama(weights: dict, h: Hparams) -> Model:
 # %%
 model_path = os.path.expanduser("~/.llama/checkpoints/Llama3.2-1B/")
 llama_weights, h = load_model_weights_and_hparams(model_path)
-model = load_llama(llama_weights, h)
 
 
 # %%
@@ -200,11 +203,19 @@ with Mesh(
     batch_size = 2
     seq_length = 16
 
+    model = load_llama(llama_weights, h)
     model = jax.tree.map(lax.with_sharding_constraint, model, make_shardings(Model))
 
     shape = (batch_size, seq_length)
     inputs: u32[b"batch/d len"] = jnp.zeros(shape, dtype=jnp.uint32)
     seq_starts: bool_[b"batch/d len"] = jnp.zeros(shape, dtype=bool)
-    logits: f32[b"batch/d len V/t"] = model.forward_pass(h, inputs, seq_starts)
+    batch = TokenBatch(targets=inputs, is_seq_start=seq_starts)
+    batch = jax.tree.map(
+        lax.with_sharding_constraint, batch, make_shardings(TokenBatch)
+    )
+
+    logits: f32[b"batch/d len V/t"] = model.forward_pass(
+        h, batch.targets, batch.is_seq_start
+    )
 
 # %%

@@ -45,8 +45,6 @@ h = Hparams(
 
 
 # %%
-# TODO: To load llama weights, model needs to flip n_q_per_kv n_kv
-# TODO: Implement a custom RoPE for llama
 def load_llama(weights, h: Hparams):
     pre_attention_norms = []
     pre_ffw_norms = []

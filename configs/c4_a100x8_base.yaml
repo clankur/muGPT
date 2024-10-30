@@ -21,6 +21,10 @@ training:
   cosine_learning_rate_final_fraction: 0.1
   use_grad_clip: true
 
+model:
+  norm_eps: 1.0e-6
+  use_scaled_rope: false
+
 flat_tokens:
   filespec: "" # Fill in
   streams: 1

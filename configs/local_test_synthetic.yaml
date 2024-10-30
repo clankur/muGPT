@@ -22,7 +22,9 @@ model:
   layers: 2
   vocab: 32768 
   d_ff: 1024
+  use_scaled_rope: true
   rope_max_timescale: 256
+  norm_eps: 1.0e-6
   a_attn: 1
   a_output: 1
   zero_queries: true

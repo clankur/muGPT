@@ -1,5 +1,4 @@
 # %%
-import numpy as np
 import torch
 import jax
 from jax import lax
@@ -12,7 +11,16 @@ from train import Hparams, BaseWidths, Model, State
 from typing import Tuple
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
-from shardlib.shardtypes import u32, bool_, f32, make_shardings, register_with_typeguard
+from shardlib.shardtypes import (
+    u32,
+    bool_,
+    f32,
+    make_shardings,
+    register_with_typeguard,
+    typed_shard_map,
+)
+from functools import partial
+
 
 register_with_typeguard()
 from input_loader import TokenBatch
@@ -132,7 +140,7 @@ def load_llama(weights: dict, h: Hparams) -> Model:
             n_kv=h.n_kv,
             d_head=h.d_head,
         )  # M_dim n_kv H_dim
-        w_kv = jnp.stack([w_k, w_v], axis=0)
+        w_kv = jnp.stack([w_k, w_v], axis=0)  # 2 M_dim n_kv H_dim
         attn_kvs.append(w_kv)
 
         w_o = jnp.from_dlpack(
@@ -187,35 +195,43 @@ def load_llama(weights: dict, h: Hparams) -> Model:
         w_down=mlp_downs,
         final_layer_norm=final_norm,
     )
+    print(f"{ model.embed.shape= }")
+    print(f"{ model.w_q.shape= }")
+
     return model
 
 
 # %%
 model_path = os.path.expanduser("~/.llama/checkpoints/Llama3.2-1B/")
 llama_weights, h = load_model_weights_and_hparams(model_path)
-
+model = load_llama(llama_weights, h)
 
 # %%
 with Mesh(
     mesh_utils.create_device_mesh([1, 1], jax.devices()[:1]),
     ("d", "t"),
 ):
-    batch_size = 2
-    seq_length = 16
+    batch_size = 1
+    seq_length = 5
 
-    model = load_llama(llama_weights, h)
     model = jax.tree.map(lax.with_sharding_constraint, model, make_shardings(Model))
+
+    @partial(typed_shard_map, check_rep=False)
+    def forward_pass(
+        x: u32[b"batch/d len"], seq_starts: bool_[b"batch/d len"], m: Model
+    ) -> f32[b"batch/d len V/t"]:
+        return m.forward_pass(h, x, seq_starts)
 
     shape = (batch_size, seq_length)
     inputs: u32[b"batch/d len"] = jnp.zeros(shape, dtype=jnp.uint32)
     seq_starts: bool_[b"batch/d len"] = jnp.zeros(shape, dtype=bool)
-    batch = TokenBatch(targets=inputs, is_seq_start=seq_starts)
+    batch: TokenBatch = TokenBatch(targets=inputs, is_seq_start=seq_starts)
     batch = jax.tree.map(
         lax.with_sharding_constraint, batch, make_shardings(TokenBatch)
     )
-
-    logits: f32[b"batch/d len V/t"] = model.forward_pass(
-        h, batch.targets, batch.is_seq_start
+    logits: f32[b"batch/d len V/t"] = forward_pass(
+        batch.targets, batch.is_seq_start, model
     )
+    print(logits)
 
 # %%

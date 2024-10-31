@@ -48,6 +48,8 @@ P = PartitionSpec
 
 PRNGKey = Any
 
+K_MASK = -2.3819763e38
+
 
 @dataclass(frozen=True)
 class BaseWidths:
@@ -212,8 +214,8 @@ class Model:
     unembed: f32["vocab/t d_model/d"]
     ln1: f32["layers d_model/t/d"]
     ln2: f32["layers d_model/t/d"]
-    w_q: f32["layers d_model/d n_kv/t n_q_per_kv d_head"]
-    w_kv: f32["layers 2 d_model/d n_kv/t d_head"]
+    w_q: f32["layers n_kv/t n_q_per_kv d_head d_model/d"]
+    w_kv: f32["layers 2 n_kv/t d_head d_model/d"]
     w_o: f32["layers d_model/d n_kv/t n_q_per_kv d_head"]
     w_gate: f32["layers d_model/d d_ff/t"]
     w_up: f32["layers d_model/d d_ff/t"]
@@ -360,11 +362,11 @@ class Model:
             nx = jnp.bfloat16(rms_norm(gx, h.norm_eps) * ln1)
 
             # Attention, using Grouped Query Attention and RoPE position embeddings.
-            w_q = shardops.all_gather("M/d K/t Q D -> M K/t Q D", jnp.bfloat16(w_q))
+            w_q = shardops.all_gather("K/t Q D M/d -> K/t Q D M", jnp.bfloat16(w_q))
             q = save_for_backward(
                 hidden_mult
                 * shardops.einsum_unreduced(
-                    "B/d L M, M K/t Q D -> B/d L K/t Q D", nx, w_q
+                    "B/d L M, K/t Q D M -> B/d L K/t Q D", nx, w_q
                 )
             )
             q = rope_table.apply("L D -> 1 L 1 1 D", q)
@@ -379,15 +381,16 @@ class Model:
             logit_scale = jax.lax.select(
                 h.parameterization.lower() == "mup",
                 h.a_attn * math.sqrt(h.base.d_head) / h.d_head,
-                1.0 / math.sqrt(h.d_head),
+                h.d_head**-0.5,
             )
+
             logits = logit_scale * shardops.einsum_unreduced(
                 "B/d Qlen K/t Q D, B/d Klen K/t D -> B/d Qlen Klen K/t Q",
                 q,
                 k,
                 preferred_element_type=jnp.float32,
             )
-            logits = jnp.where(causal_mask, logits, -1e10)
+            logits = jnp.where(causal_mask, logits, K_MASK)
             probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
             attn_out = shardops.einsum_unreduced(
                 "B/d Qlen Klen K/t Q, B/d Klen K/t D -> B/d Qlen K/t Q D", probs, v

@@ -195,8 +195,6 @@ def load_llama(weights: dict, h: Hparams) -> Model:
         w_down=mlp_downs,
         final_layer_norm=final_norm,
     )
-    print(f"{ model.embed.shape= }")
-    print(f"{ model.w_q.shape= }")
 
     return model
 
@@ -223,8 +221,8 @@ with Mesh(
         return m.forward_pass(h, x, seq_starts)
 
     shape = (batch_size, seq_length)
-    inputs: u32[b"batch/d len"] = jnp.zeros(shape, dtype=jnp.uint32)
-    seq_starts: bool_[b"batch/d len"] = jnp.zeros(shape, dtype=bool)
+    inputs: u32[b"batch/d len"] = jnp.ones(shape, dtype=jnp.uint32)
+    seq_starts: bool_[b"batch/d len"] = jnp.ones(shape, dtype=bool)
     batch: TokenBatch = TokenBatch(targets=inputs, is_seq_start=seq_starts)
     batch = jax.tree.map(
         lax.with_sharding_constraint, batch, make_shardings(TokenBatch)

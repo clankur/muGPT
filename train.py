@@ -49,6 +49,8 @@ P = PartitionSpec
 PRNGKey = Any
 
 K_MASK = -2.3819763e38
+jnp.bfloat16 = jnp.float32
+bf16 = f32
 
 
 @dataclass(frozen=True)
@@ -341,10 +343,14 @@ class Model:
         segment_mask: bool_[b"B/d L L 1 1"] = segment_mask[
             ..., jnp.newaxis, jnp.newaxis
         ]  # add axes for q_per_k, num_kv_heads dimensions
-        causal_mask: bool_[b"1 L L 1 1"] = jnp.tril(
-            jnp.ones((L, L), dtype=jnp.bool_), 0
-        )[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
-        causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
+        # causal_mask: bool_[b"1 L L 1 1"] = jnp.tril(
+        #     jnp.ones((L, L), dtype=jnp.bool_), 0
+        # )[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
+        # causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
+
+        causal_mask: f32[b"1 L L 1 1"] = jnp.triu(jnp.full((L, L), K_MASK), k=1)[
+            jnp.newaxis, ..., jnp.newaxis, jnp.newaxis
+        ]
 
         rope_table = RopeTable.create(L, h)
 
@@ -390,7 +396,8 @@ class Model:
                 k,
                 preferred_element_type=jnp.float32,
             )
-            logits = jnp.where(causal_mask, logits, K_MASK)
+            logits = logits + causal_mask
+            logits = jnp.where(segment_mask, logits, K_MASK)
             probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
             attn_out = shardops.einsum_unreduced(
                 "B/d Qlen Klen K/t Q, B/d Klen K/t D -> B/d Qlen K/t Q D", probs, v

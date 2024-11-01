@@ -233,3 +233,36 @@ with Mesh(
     print(logits)
 
 # %%
+import numpy as np
+
+
+def compare_tensors(
+    tensor1: jax.Array | torch.Tensor,
+    tensor2: jax.Array | torch.Tensor,
+    tolerance: float = 1.3e-4,
+) -> tuple[bool, bool]:
+    tensor1 = torch.from_dlpack(asdlpack(tensor1))
+    tensor2 = torch.from_dlpack(asdlpack(tensor2))
+
+    # Check if shapes are the same
+    if tensor1.shape != tensor2.shape:
+        print(f"tensors don't have same shape: {tensor1.shape=}, {tensor2.shape=}")
+        return False, False
+
+    # Check for exact match
+    exact_match = torch.equal(tensor1, tensor2)
+
+    # Check for approximate match
+    max_diff = torch.max(torch.abs(tensor1 - tensor2))
+
+    approximate_match = max_diff <= tolerance
+
+    return exact_match, approximate_match.item(), max_diff
+
+
+# %%
+logits_from_torch = jnp.array(np.load("logits_torch.npy"))
+_, _, diff = compare_tensors(logits, logits_from_torch)
+
+
+# %%

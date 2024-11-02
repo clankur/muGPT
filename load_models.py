@@ -7,7 +7,7 @@ from dlpack import asdlpack
 from einops import rearrange
 import json
 import os
-from train import Hparams, BaseWidths, Model, State
+from train import Hparams, BaseWidths, Model
 from typing import Tuple
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
@@ -21,9 +21,8 @@ from shardlib.shardtypes import (
 )
 from functools import partial
 
-
 register_with_typeguard()
-from input_loader import TokenBatch
+from input_loader import TokenBatch, TokenBatchParams, FlatTokensParams, get_loader
 
 
 os.environ["XLA_FLAGS"] = (
@@ -200,69 +199,46 @@ def load_llama(weights: dict, h: Hparams) -> Model:
 
 
 # %%
+flat_tokens = FlatTokensParams(
+    streams=1,
+    read_blocks_per_shuffle_buffer=128,
+    sequences_per_read_block=1024,
+    seed=0,
+    sequence_packing=True,
+    filespec="",
+)
+batch_params = TokenBatchParams(len=64, batch=2)
+N = 1
+# %%
 model_path = os.path.expanduser("~/.llama/checkpoints/Llama3.2-1B/")
 llama_weights, h = load_model_weights_and_hparams(model_path)
 model = load_llama(llama_weights, h)
-
 # %%
 with Mesh(
-    mesh_utils.create_device_mesh([1, 1], jax.devices()[:1]),
+    mesh_utils.create_device_mesh([1, 8], jax.devices()[:8]),
     ("d", "t"),
 ):
-    batch_size = 1
-    seq_length = 5
-
-    model = jax.tree.map(lax.with_sharding_constraint, model, make_shardings(Model))
+    loader = get_loader("train", flat_tokens, batch_params)
+    shardings = make_shardings(Model)
+    model = jax.tree.map(lambda x, s: jax.device_put(x, s), model, shardings)
+    # model = jax.tree.map(jax.lax.with_sharding_constraint, model, shardings)
 
     @partial(typed_shard_map, check_rep=False)
-    def forward_pass(
-        x: u32[b"batch/d len"], seq_starts: bool_[b"batch/d len"], m: Model
-    ) -> f32[b"batch/d len V/t"]:
-        return m.forward_pass(h, x, seq_starts)
+    def forward(batch: TokenBatch, m: Model) -> f32[b"B/d L V/t"]:
+        # return m.loss(h, batch)
+        return m.forward_pass(h, batch.targets, batch.is_seq_start)
 
-    shape = (batch_size, seq_length)
-    inputs: u32[b"batch/d len"] = jnp.ones(shape, dtype=jnp.uint32)
-    seq_starts: bool_[b"batch/d len"] = jnp.ones(shape, dtype=bool)
-    batch: TokenBatch = TokenBatch(targets=inputs, is_seq_start=seq_starts)
-    batch = jax.tree.map(
-        lax.with_sharding_constraint, batch, make_shardings(TokenBatch)
-    )
-    logits: f32[b"batch/d len V/t"] = forward_pass(
-        batch.targets, batch.is_seq_start, model
-    )
-    print(logits)
-
-# %%
-import numpy as np
-
-
-def compare_tensors(
-    tensor1: jax.Array | torch.Tensor,
-    tensor2: jax.Array | torch.Tensor,
-    tolerance: float = 1.3e-4,
-) -> tuple[bool, bool]:
-    tensor1 = torch.from_dlpack(asdlpack(tensor1))
-    tensor2 = torch.from_dlpack(asdlpack(tensor2))
-
-    # Check if shapes are the same
-    if tensor1.shape != tensor2.shape:
-        print(f"tensors don't have same shape: {tensor1.shape=}, {tensor2.shape=}")
-        return False, False
-
-    # Check for exact match
-    exact_match = torch.equal(tensor1, tensor2)
-
-    # Check for approximate match
-    max_diff = torch.max(torch.abs(tensor1 - tensor2))
-
-    approximate_match = max_diff <= tolerance
-
-    return exact_match, approximate_match.item(), max_diff
-
-
-# %%
-logits_from_torch = jnp.array(np.load("logits_torch.npy"))
-_, _, diff = compare_tensors(logits, logits_from_torch)
-
+    perplexity = 0.0
+    total_tokens = 0
+    for step in range(N):
+        batch: TokenBatch = loader.load(step)
+        logits = forward(batch, model)
+        # loss = nll(batch, model)
+        # perplexity += loss * batch.targets.shape[0] * batch.targets.shape[1]
+        # total_tokens += batch.targets.shape[0] * batch.targets.shape[1]
+        print(logits)
+    # average_loss = perplexity / total_tokens
+    # perplexity = jnp.exp(average_loss)
+    # print(perplexity)
 
 # %%

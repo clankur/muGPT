@@ -1,12 +1,14 @@
 # %%
 import jax
+import jax.numpy as jnp
 import functools
-from typing import Tuple
+from typing import Tuple, List
 from input_loader import TokenBatch
 from dataclasses import dataclass
 import random
 import string
 from collections import defaultdict, deque
+from shardlib import shardtypes
 
 # %%
 
@@ -37,13 +39,32 @@ class VariableTrie:
         return random_var
 
 
+class SyntheticTokenizer:
+    def __init__(self):
+        self.vocab = list("abcdefghijklmnopqrstuvwxyz=()#0123456789+-*/\n ") + ["[PAD]"]
+        self.token_to_id = {char: idx for idx, char in enumerate(self.vocab)}
+        self.id_to_token = {idx: char for char, idx in self.token_to_id.items()}
+        self.pad_token_id = self.token_to_id["[PAD]"]  # Special token ID for padding
+
+    def encode(self, text: str) -> jnp.ndarray:
+        """Encode text into a sequence of token IDs."""
+        return jnp.array([self.token_to_id[char] for char in text], dtype=jnp.int32)
+
+    def decode(self, token_ids: jnp.ndarray) -> str:
+        """Decode a sequence of token IDs back into text."""
+        return "".join([self.id_to_token.get(int(id_), "") for id_ in token_ids])
+
+
 class SyntheticGenerator:
 
-    def __init__(self, seed: int, min_seq_length: int = 256):
+    def __init__(self, seed: int, seq_length: int, batch_size: int):
         self.variables = {}
         self.trie = VariableTrie()
         self.last_entries = deque(maxlen=3)
-        self.min_seq_length = min_seq_length
+        self.seq_length = seq_length
+        self.min_padding = 20
+        self.tokenizer = SyntheticTokenizer()
+        self.batch_size = batch_size
         random.seed(seed)
 
     def generate_print_statement(self, var, value):
@@ -79,8 +100,8 @@ class SyntheticGenerator:
 
     def get_next_sequence(self):
         sequence = ""
-        print_mask = []
-        while len(sequence) < self.min_seq_length:
+        mask = jnp.zeros((self.seq_length))
+        while len(sequence) + self.min_padding < self.seq_length:
             if len(self.variables) < 0 or random.random() < 0.7:
                 sequence += self.generate_assignment()
             else:
@@ -89,38 +110,66 @@ class SyntheticGenerator:
                 sequence += self.generate_print_statement(var, value)
                 # last characters are the var's value, add to mask
                 mask_region = (sequence.rfind(" ") + 1, len(sequence))
-                print_mask.append(mask_region)
+                mask = mask.at[mask_region[0] : mask_region[1]].set(1)
             sequence += "\n"
-        return sequence, print_mask
+        return sequence, mask
+
+    def generate_batch(
+        self,
+    ) -> Tuple[jnp.ndarray, List[List[Tuple[int, int]]]]:
+        """
+        Generate a batch of tokenized sequences and their respective print masks.
+
+        Returns:
+            Tuple[jnp.ndarray, List[List[Tuple[int, int]]]]: A batch of tokenized sequences and their masks.
+        """
+        sequences = []
+        masks = []
+
+        for _ in range(self.batch_size):
+            sequence, print_mask = self.get_next_sequence()
+            encoded_sequence = jnp.pad(
+                self.tokenizer.encode(sequence),
+                (0, self.seq_length - len(sequence)),
+                constant_values=self.tokenizer.pad_token_id,
+            )
+            print(encoded_sequence.shape)
+            sequences.append(encoded_sequence)
+            masks.append(print_mask)
+
+        padded_sequences = jnp.stack(sequences)
+        masks = jnp.stack(masks)
+        return padded_sequences, masks
 
     def __iter__(self):
         return self
 
     def __next__(self):
-        return self.get_next_sequence()
+        return self.generate_batch()
 
 
 # %%
-generator = SyntheticGenerator(42)
-v, mask = next(generator)
-print(len(v), "\n")
-print(v)
-
-
-# %%
-@dataclass
+@dataclass(frozen=True)
 class SyntethicDataParams:
+    max_seq_len: int
+    batch_size: int
     seed: int = 0
-    streams: int
 
 
 class SyntheticDataLoader:
-    def __init__(self):
-        pass
+    def __init__(self, config: SyntethicDataParams):
+        self.iterator = SyntheticGenerator(
+            config.seed, config.max_seq_len, config.batch_size
+        )
+        self.batch_size = config.batch_size
+        self.max_seq_len = config.max_seq_len
+        self.sharding = shardtypes.make_shardings(TokenBatch).targets
 
-    def load(self, step):
+    def load(self):
         shape = (self.batch_size, self.max_seq_len)
-        batch, is_start = next(self.iterator)
+        batch, mask = next(self.iterator)
+        is_seq_start = jnp.zeros((shape))
+        is_seq_start = is_seq_start.at[:, 0].set(1)
 
         def get_shard(x: jax.Array, indexing: Tuple[slice]) -> jax.Array:
             shard = x[indexing]
@@ -129,7 +178,14 @@ class SyntheticDataLoader:
         tokens = jax.make_array_from_callback(
             shape, self.sharding, functools.partial(get_shard, batch)
         )
-        is_start = jax.make_array_from_callback(
-            shape, self.sharding, functools.partial(get_shard, is_start)
+        mask = jax.make_array_from_callback(
+            shape, self.sharding, functools.partial(get_shard, mask)
         )
-        return TokenBatch(tokens, is_start)
+        is_seq_start = jax.make_array_from_callback(
+            shape, self.sharding, functools.partial(get_shard, is_seq_start)
+        )
+
+        return TokenBatch(tokens, is_seq_start)
+
+
+# %%

@@ -82,12 +82,13 @@ class SyntheticGenerator:
 
     def generate_assignment(self):
         """Generate an assignment statement for a new or existing variable."""
-        # 70% chance of creating a new variable if few variables exist, else 50%
-        if len(self.variables) < 2 or random.random() < 0.5:
+        # If no variables exist or if the random chance dictates, generate a new variable
+        if not self.variables or random.random() < 0.5:
             var = self.generate_random_variable()
             value = random.randint(1, 100)
             self.variables[var] = value
         else:
+            # Choose an existing variable
             var = random.choice(list(self.variables.keys()))
             if random.random() < 0.2:  # 20% chance to assign a new value
                 value = random.randint(1, 100)
@@ -95,6 +96,7 @@ class SyntheticGenerator:
             else:  # 80% chance to assign value of another variable
                 value = random.choice(list(self.variables.keys()))
                 self.variables[var] = self.variables[value]
+
         self.last_entries.append(var[-1])
         return f"{var}={value}"
 
@@ -102,7 +104,7 @@ class SyntheticGenerator:
         sequence = ""
         mask = jnp.zeros((self.seq_length))
         while len(sequence) + self.min_padding < self.seq_length:
-            if len(self.variables) < 0 or random.random() < 0.7:
+            if len(self.variables) == 0 or random.random() < 0.7:
                 sequence += self.generate_assignment()
             else:
                 var = random.choice(list(self.variables.keys()))
@@ -113,6 +115,12 @@ class SyntheticGenerator:
                 mask = mask.at[mask_region[0] : mask_region[1]].set(1)
             sequence += "\n"
         return sequence, mask
+
+    def reset_state(self):
+        """Reset stateful attributes to ensure independence between batches."""
+        self.variables = {}  # Clear variable assignments
+        self.last_entries = deque(maxlen=3)  # Clear recent entries
+        self.trie = VariableTrie()
 
     def generate_batch(
         self,
@@ -133,9 +141,9 @@ class SyntheticGenerator:
                 (0, self.seq_length - len(sequence)),
                 constant_values=self.tokenizer.pad_token_id,
             )
-            print(encoded_sequence.shape)
             sequences.append(encoded_sequence)
             masks.append(print_mask)
+            self.reset_state()
 
         padded_sequences = jnp.stack(sequences)
         masks = jnp.stack(masks)
@@ -167,7 +175,7 @@ class SyntheticDataLoader:
 
     def load(self):
         shape = (self.batch_size, self.max_seq_len)
-        batch, mask = next(self.iterator)
+        tokens, mask = next(self.iterator)
         is_seq_start = jnp.zeros((shape))
         is_seq_start = is_seq_start.at[:, 0].set(1)
 
@@ -176,7 +184,7 @@ class SyntheticDataLoader:
             return shard
 
         tokens = jax.make_array_from_callback(
-            shape, self.sharding, functools.partial(get_shard, batch)
+            shape, self.sharding, functools.partial(get_shard, tokens)
         )
         mask = jax.make_array_from_callback(
             shape, self.sharding, functools.partial(get_shard, mask)
@@ -187,5 +195,31 @@ class SyntheticDataLoader:
 
         return TokenBatch(tokens, is_seq_start)
 
+
+# %%
+import os
+from jax.sharding import Mesh
+from jax.experimental import mesh_utils
+from shardlib.shardtypes import (
+    u32,
+    bool_,
+    f32,
+    make_shardings,
+    register_with_typeguard,
+    typed_shard_map,
+)
+
+os.environ["XLA_FLAGS"] = (
+    "--xla_force_host_platform_device_count=8"  # Use 8 CPU devices
+)
+# %%
+with Mesh(
+    mesh_utils.create_device_mesh([1, 8], jax.devices()[:8]),
+    ("d", "t"),
+):
+    config = SyntethicDataParams(max_seq_len=256, batch_size=8, seed=0)
+    loader = SyntheticDataLoader(config)
+    token_batch = loader.load()
+    print(token_batch.targets)
 
 # %%

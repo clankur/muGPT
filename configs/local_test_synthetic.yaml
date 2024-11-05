@@ -50,10 +50,13 @@ mesh:
   d: 4
   t: 2
 
-flat_tokens:
-  filespec: 'synthetic_dataset.zarr'
-  streams: 1
-  read_blocks_per_shuffle_buffer: 128
-  sequences_per_read_block: 1024
-  seed: 0
-  sequence_packing: true
+# flat_tokens:
+#   filespec: 'synthetic_dataset.zarr'
+#   streams: 1
+#   read_blocks_per_shuffle_buffer: 128
+#   sequences_per_read_block: 1024
+#   seed: 0
+#   sequence_packing: true
+
+synthetic_dataset:
+  seed: 420

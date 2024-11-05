@@ -445,12 +445,15 @@ class SyntheticDataLoader:
         )
         self.batch_size = token_batch_params.batch
         self.max_seq_len = token_batch_params.len
+        self.max_token_id = len(self.iterator.tokenizer.vocab) - 1
+
         self.sharding = shardtypes.make_shardings(TokenBatch).targets
 
-    def load(self):
+    def load(self, step: int):
+        # step is unused. TBD what I do with it
         shape = (self.batch_size, self.max_seq_len)
         tokens, mask = next(self.iterator)
-        is_seq_start = jnp.zeros((shape))
+        is_seq_start = jnp.zeros((shape), dtype=jnp.bool)
         is_seq_start = is_seq_start.at[:, 0].set(1)
 
         def get_shard(x: jax.Array, indexing: Tuple[slice]) -> jax.Array:

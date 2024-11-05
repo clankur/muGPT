@@ -36,14 +36,16 @@ class VariableTrie:
 
 class SyntheticTokenizer:
     def __init__(self):
-        self.vocab = list("abcdefghijklmnopqrstuvwxyz=()#0123456789+-*/\n ") + ["[PAD]"]
+        self.vocab = list("abcdefghijklmnopqrstuvwxyz=()#0123456789+-*/\n ") + [
+            "[PAD]",
+        ]  # add "[END_OF_TEXT]" as max token id?
         self.token_to_id = {char: idx for idx, char in enumerate(self.vocab)}
         self.id_to_token = {idx: char for char, idx in self.token_to_id.items()}
         self.pad_token_id = self.token_to_id["[PAD]"]  # Special token ID for padding
 
     def encode(self, text: str) -> jnp.ndarray:
         """Encode text into a sequence of token IDs."""
-        return jnp.array([self.token_to_id[char] for char in text], dtype=jnp.int32)
+        return jnp.array([self.token_to_id[char] for char in text], dtype=jnp.uint32)
 
     def decode(self, token_ids: jnp.ndarray) -> str:
         """Decode a sequence of token IDs back into text."""

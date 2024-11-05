@@ -24,6 +24,7 @@ https://docs.mosaicml.com/projects/streaming/en/stable/fundamentals/shuffling.ht
 from concurrent.futures import ThreadPoolExecutor
 import functools
 from typing import Tuple, Union, Optional
+import random
 
 from typeguard import typechecked
 from shardlib.shardtypes import bool_, pytree_dataclass, u32
@@ -440,9 +441,9 @@ class SyntheticDataLoader:
         token_batch_params: TokenBatchParams,
     ):
         assert split in ["train", "validation"], "Invalid split"
-        split_seed = config.seed + (1 if split == "validation" else 0)
+        self.base_seed = config.seed + (1 if split == "validation" else 0)
         self.iterator = SyntheticGenerator(
-            split_seed, token_batch_params.len, token_batch_params.batch
+            self.base_seed, token_batch_params.len, token_batch_params.batch
         )
         self.batch_size = token_batch_params.batch
         self.max_seq_len = token_batch_params.len
@@ -451,7 +452,8 @@ class SyntheticDataLoader:
         self.sharding = shardtypes.make_shardings(TokenBatch).targets
 
     def load(self, step: int):
-        # step is unused. TBD what I do with it
+        random.seed(self.base_seed + step)
+
         shape = (self.batch_size, self.max_seq_len)
         tokens, mask = next(self.iterator)
         is_seq_start = jnp.zeros((shape), dtype=jnp.bool)

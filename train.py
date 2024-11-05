@@ -13,6 +13,7 @@ from shardlib.shardtypes import bf16, bool_, f32, pytree_dataclass, u32, make_sh
 from input_loader import (
     FlatTokensParams,
     HuggingFaceDataParams,
+    SyntheticDataParams,
     TokenBatch,
     TokenBatchParams,
     get_loader,
@@ -723,6 +724,7 @@ class Config:
     io: training_io.IOConfig
     flat_tokens: Optional[FlatTokensParams] = None
     hf_dataset: Optional[HuggingFaceDataParams] = None
+    synthetic_dataset: Optional[SyntheticDataParams] = None
 
     def __post_init__(self):
         assert (
@@ -733,8 +735,10 @@ class Config:
         ), "Should not specify both flat_tokens and hf_dataset."
 
     @cached_property
-    def training_data(self) -> Union[FlatTokensParams, HuggingFaceDataParams]:
-        return self.flat_tokens or self.hf_dataset
+    def training_data(
+        self,
+    ) -> Union[FlatTokensParams, HuggingFaceDataParams, SyntheticDataParams]:
+        return self.flat_tokens or self.hf_dataset or SyntheticDataParams
 
 
 def main_contained(config, logger):

@@ -439,9 +439,10 @@ class SyntheticDataLoader:
         config: SyntheticDataParams,
         token_batch_params: TokenBatchParams,
     ):
-        self.split = split  # unused
+        assert split in ["train", "validation"], "Invalid split"
+        split_seed = config.seed + (1 if split == "validation" else 0)
         self.iterator = SyntheticGenerator(
-            config.seed, token_batch_params.len, token_batch_params.batch
+            split_seed, token_batch_params.len, token_batch_params.batch
         )
         self.batch_size = token_batch_params.batch
         self.max_seq_len = token_batch_params.len

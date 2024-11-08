@@ -22,7 +22,7 @@ from shardlib.shardtypes import (
 from functools import partial
 
 register_with_typeguard()
-from input_loader import TokenBatch, TokenBatchParams, FlatTokensParams, get_loader
+from input_loader import TokenBatch, TokenBatchParams, FlatTokensParams, HuggingFaceDataParams, get_loader
 
 
 os.environ["XLA_FLAGS"] = (
@@ -207,6 +207,14 @@ flat_tokens = FlatTokensParams(
     sequence_packing=True,
     filespec="",
 )
+
+hf_tokens = HuggingFaceDataParams(
+    path="allenai/c4",
+    name="en",
+    num_workers=64,
+    tokenizer="meta-llama/Llama-3.2-1B",
+    sequences_packed_per_batch=120,
+)
 batch_params = TokenBatchParams(len=64, batch=2)
 N = 1
 # %%
@@ -218,7 +226,7 @@ with Mesh(
     mesh_utils.create_device_mesh([1, 8], jax.devices()[:8]),
     ("d", "t"),
 ):
-    loader = get_loader("train", flat_tokens, batch_params)
+    loader = get_loader("train", hf_tokens, batch_params)
     shardings = make_shardings(Model)
     model = jax.tree.map(lambda x, s: jax.device_put(x, s), model, shardings)
     # model = jax.tree.map(jax.lax.with_sharding_constraint, model, shardings)

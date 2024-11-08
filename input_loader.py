@@ -294,7 +294,6 @@ class HuggingFaceDataLoader:
         self.max_seq_len = token_batch_params.len
         self.sharding = shardtypes.make_shardings(TokenBatch).targets
         self.max_token_id = self.tokenizer.vocab_size-1
-        assert 0 in self.tokenizer.all_special_ids, "Tokenizer must have a special 0 token"
 
         # setup an iterator over the dataset
         tokenize = functools.partial(self.tokenizer, padding=False, truncation=False, max_length=None, add_special_tokens=False, return_token_type_ids=False, return_attention_mask=False, return_tensors="np")

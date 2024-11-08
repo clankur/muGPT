@@ -20,6 +20,8 @@ from shardlib.shardtypes import (
     typed_shard_map,
 )
 from functools import partial
+from typeguard import typechecked
+
 
 register_with_typeguard()
 from input_loader import TokenBatch, TokenBatchParams, FlatTokensParams, HuggingFaceDataParams, get_loader
@@ -243,7 +245,7 @@ with Mesh(
     total_tokens = 0
     for step in range(N):
         batch: TokenBatch = loader.load(step)
-        loss = nll(batch, model)
+        loss:f32[b""] =typechecked(nll(batch, model))
         print(f"{loss= }")
         perplexity += loss * batch.targets.shape[0] * batch.targets.shape[1]
         total_tokens += batch.targets.shape[0] * batch.targets.shape[1]

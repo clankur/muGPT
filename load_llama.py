@@ -211,19 +211,19 @@ flat_tokens = FlatTokensParams(
 hf_tokens = HuggingFaceDataParams(
     path="allenai/c4",
     name="en",
-    num_workers=64,
+    num_workers=0,
     tokenizer="meta-llama/Llama-3.2-1B",
     sequences_packed_per_batch=120,
 )
 batch_params = TokenBatchParams(len=64, batch=2)
-N = 1
+N = 100
 # %%
 model_path = os.path.expanduser("~/.llama/checkpoints/Llama3.2-1B/")
 llama_weights, h = load_model_weights_and_hparams(model_path)
 model = load_llama(llama_weights, h)
 # %%
 with Mesh(
-    mesh_utils.create_device_mesh([1, 8], jax.devices()[:8]),
+    mesh_utils.create_device_mesh([1, 1], jax.devices()[:1]),
     ("d", "t"),
 ):
     loader = get_loader("train", hf_tokens, batch_params)
@@ -233,20 +233,22 @@ with Mesh(
 
     @partial(typed_shard_map, check_rep=False)
     def forward(batch: TokenBatch, m: Model) -> f32[b"B/d L V/t"]:
-        # return m.loss(h, batch)
         return m.forward_pass(h, batch.targets, batch.is_seq_start)
+
+    @partial(typed_shard_map, check_rep=False)
+    def nll(batch: TokenBatch, m: Model) -> f32[b""]:
+        return m.loss(h, batch)
 
     perplexity = 0.0
     total_tokens = 0
     for step in range(N):
         batch: TokenBatch = loader.load(step)
-        logits = forward(batch, model)
-        # loss = nll(batch, model)
-        # perplexity += loss * batch.targets.shape[0] * batch.targets.shape[1]
-        # total_tokens += batch.targets.shape[0] * batch.targets.shape[1]
-        print(logits)
-    # average_loss = perplexity / total_tokens
-    # perplexity = jnp.exp(average_loss)
-    # print(perplexity)
+        loss = nll(batch, model)
+        print(f"{loss= }")
+        perplexity += loss * batch.targets.shape[0] * batch.targets.shape[1]
+        total_tokens += batch.targets.shape[0] * batch.targets.shape[1]
+    average_loss = perplexity / total_tokens
+    perplexity = jnp.exp(average_loss)
+    print(f"{perplexity= }")
 
 # %%

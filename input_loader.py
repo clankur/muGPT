@@ -23,7 +23,7 @@ https://docs.mosaicml.com/projects/streaming/en/stable/fundamentals/shuffling.ht
 
 from concurrent.futures import ThreadPoolExecutor
 import functools
-from typing import Tuple, Union, Optional
+from typing import Tuple, Union, Optional, List
 import random
 
 from typeguard import typechecked
@@ -59,6 +59,7 @@ class TokenBatch:
 
     targets: u32["batch/d len"]
     is_seq_start: bool_["batch/d len"]
+    comment_regions: u32["batch/d n_prints 2"]
 
 
 @dataclass(frozen=True)
@@ -455,7 +456,7 @@ class SyntheticDataLoader:
         random.seed(self.base_seed + step)
 
         shape = (self.batch_size, self.max_seq_len)
-        tokens, mask = next(self.iterator)
+        tokens, comment_regions = next(self.iterator)
         is_seq_start = jnp.zeros((shape), dtype=jnp.bool)
         is_seq_start = is_seq_start.at[:, 0].set(1)
 
@@ -466,14 +467,11 @@ class SyntheticDataLoader:
         tokens = jax.make_array_from_callback(
             shape, self.sharding, functools.partial(get_shard, tokens)
         )
-        mask = jax.make_array_from_callback(
-            shape, self.sharding, functools.partial(get_shard, mask)
-        )
         is_seq_start = jax.make_array_from_callback(
             shape, self.sharding, functools.partial(get_shard, is_seq_start)
         )
 
-        return TokenBatch(tokens, is_seq_start)
+        return TokenBatch(tokens, is_seq_start, comment_regions)
 
 
 def get_loader(

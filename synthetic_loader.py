@@ -82,7 +82,7 @@ class SyntheticGenerator:
         # If no variables exist or if the random chance dictates, generate a new variable
         if not self.variables or random.random() < 0.5:
             var = self.generate_random_variable()
-            value = random.randint(1, 100)
+            value = random.randint(1, 999)
             self.variables[var] = value
         else:
             # Choose an existing variable
@@ -97,21 +97,36 @@ class SyntheticGenerator:
         self.last_entries.append(var[-1])
         return f"{var}={value}"
 
+
     def get_next_sequence(self):
         sequence = ""
-        mask = jnp.zeros((self.seq_length))
-        while len(sequence) + self.min_padding < self.seq_length:
-            if len(self.variables) == 0 or random.random() < 0.7:
-                sequence += self.generate_assignment()
-            else:
+        total_len = self.seq_length - self.min_padding
+        num_prints = int(total_len * 0.3)
+
+        random_positions = sorted(random.sample(range(total_len), num_prints))
+
+        comments = jnp.zeros((num_prints, 2), dtype=jnp.uint32)
+        pos = 0  # Track index in random_positions
+
+        while len(sequence) < total_len:
+            if len(self.variables.keys()) > 0 and pos < num_prints and len(sequence) >= random_positions[pos]:
+                # Generate a print statement
                 var = random.choice(list(self.variables.keys()))
                 value = self.variables[var]
                 sequence += self.generate_print_statement(var, value)
-                # last characters are the var's value, add to mask
-                mask_region = (sequence.rfind(" ") + 1, len(sequence))
-                mask = mask.at[mask_region[0] : mask_region[1]].set(1)
+
+                # Store the start and end indices in comments array
+                comment_start = sequence.rfind(" ") + 1
+                comment_end = len(sequence)
+                comments = comments.at[pos].set([comment_start, comment_end])
+                pos += 1  # Move to the next position
+            else:
+                # Generate an assignment
+                sequence += self.generate_assignment()
+
             sequence += "\n"
-        return sequence, mask
+
+        return sequence, comments
 
     def reset_state(self):
         """Reset stateful attributes to ensure independence between batches."""
@@ -121,30 +136,30 @@ class SyntheticGenerator:
 
     def generate_batch(
         self,
-    ) -> Tuple[jnp.ndarray, List[List[Tuple[int, int]]]]:
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """
         Generate a batch of tokenized sequences and their respective print masks.
 
         Returns:
-            Tuple[jnp.ndarray, List[List[Tuple[int, int]]]]: A batch of tokenized sequences and their masks.
+            Tuple[jnp.ndarray, jnp.ndarray]: A batch of tokenized sequences and their masks.
         """
         sequences = []
-        masks = []
+        comment_regions = []
 
         for _ in range(self.batch_size):
-            sequence, print_mask = self.get_next_sequence()
+            sequence, region = self.get_next_sequence()
             encoded_sequence = jnp.pad(
                 self.tokenizer.encode(sequence),
                 (0, self.seq_length - len(sequence)),
                 constant_values=self.tokenizer.pad_token_id,
             )
             sequences.append(encoded_sequence)
-            masks.append(print_mask)
+            comment_regions.append(region)
+            assert region.shape == (int((self.seq_length -self.min_padding)* 0.3), 2) 
+
             self.reset_state()
 
-        padded_sequences = jnp.stack(sequences)
-        masks = jnp.stack(masks)
-        return padded_sequences, masks
+        return jnp.stack(sequences), jnp.stack(comment_regions)
 
     def __iter__(self):
         return self

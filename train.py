@@ -483,6 +483,26 @@ class Model:
             "batch/d len -> batch/d len/t", logprobs_at_targets
         )
         tokens_in_global_batch = logprobs_at_targets.size * jax.lax.psum(1, ("d", "t"))
+
+        probs_at_targets = jnp.exp(logprobs_at_targets)
+
+        comment_starts: u32[b"batch/d n_print"] = batch.comment_starts
+        comment_ends: u32[b"batch/d n_print"] = batch.comment_ends
+
+        bound = 4
+        selected_indices = jax.vmap(lambda x: jax.vmap(lambda y: y + jnp.arange(bound))(x))(comment_starts)
+        selected_regions = jax.vmap(
+            lambda data_row, indices_row: jax.vmap(
+                lambda idx: data_row[idx])
+            (indices_row)
+        )(probs_at_targets, selected_indices)
+
+        # jax.debug.print("probs_at_targets={val}", val=probs_at_targets[0])
+        # jax.debug.print("logprobs={val}", val=logprobs[0])
+        # jax.debug.print("logprobs_at_targets={val}", val=logprobs_at_targets[0])
+        jax.debug.print("selected_regions={val}", val=selected_regions.shape)
+        # jax.debug.print("comment_starts={val1}\ncomment_ends={val2}", val1=comment_starts[0], val2=comment_ends[0])
+
         return -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch)
 
 
@@ -529,6 +549,11 @@ class Metrics:
     learning_rate: f32[b""]
     grad_norm: f32[b""]
     raw_grad_norm: f32[b""]
+
+    # TODO: Track average confidence (?)
+    # TODO: Track P(correct answer) for print string commetns 
+        # How do we assess that across multiple examples with several tokens (>20% of them being related to the answer)
+        # # correct answer being the entire substring uptil the new line
 
 
 @dataclass(frozen=True)

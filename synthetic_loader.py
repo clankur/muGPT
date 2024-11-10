@@ -106,8 +106,7 @@ class SyntheticGenerator:
 
         random_positions = sorted(random.sample(range(1, total_len), num_prints))
 
-        comment_start = jnp.zeros((num_prints), dtype=jnp.uint32)
-        comment_end = jnp.zeros((num_prints), dtype=jnp.uint32)
+        comment_mask = jnp.zeros((self.seq_length), dtype=jnp.bool)
 
         pos = 0  # Track index in random_positions
 
@@ -119,15 +118,16 @@ class SyntheticGenerator:
                 sequence += self.generate_print_statement(var, value)
 
                 # Store the start and end indices in comments array
-                comment_start = comment_start.at[pos].set(sequence.rfind(" ") + 1)
-                comment_end = comment_end.at[pos].set(len(sequence))
+                region = (sequence.rfind(" ") + 1, len(sequence))
+                mask = (jnp.arange(comment_mask.size) >= region[0]) & (jnp.arange(comment_mask.size) < region[1])
+                comment_mask = jnp.where(mask, 1, comment_mask)
                 pos += 1  # Move to the next position
             else:
                 # Generate an assignment
                 sequence += self.generate_assignment()
 
             sequence += "\n"
-        return sequence, comment_start, comment_end 
+        return sequence, comment_mask
 
     def reset_state(self):
         """Reset stateful attributes to ensure independence between batches."""
@@ -145,21 +145,19 @@ class SyntheticGenerator:
             Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]: A batch of tokenized sequences and their masks.
         """
         sequences = []
-        starts = []
-        ends = []
+        masks = []
         for _ in range(self.batch_size):
-            sequence, comment_start, comment_end = self.get_next_sequence()
+            sequence, comment_mask = self.get_next_sequence()
             encoded_sequence = jnp.pad(
                 self.tokenizer.encode(sequence),
                 (0, self.seq_length - len(sequence)),
                 constant_values=self.tokenizer.pad_token_id,
             )
             sequences.append(encoded_sequence)
-            starts.append(comment_start)
-            ends.append(comment_end)
+            masks.append(comment_mask)
             self.reset_state()
 
-        return jnp.stack(sequences), jnp.stack(starts), jnp.stack(ends)
+        return jnp.stack(sequences), jnp.stack(masks, dtype=jnp.bool)
 
     def __iter__(self):
         return self

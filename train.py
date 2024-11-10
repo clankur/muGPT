@@ -486,21 +486,14 @@ class Model:
 
         probs_at_targets = jnp.exp(logprobs_at_targets)
 
-        comment_starts: u32[b"batch/d n_print"] = batch.comment_starts
-        comment_ends: u32[b"batch/d n_print"] = batch.comment_ends
+        comment_mask: bool_[b"batch/d len"] = batch.masks
 
-        bound = 4
-        selected_indices = jax.vmap(lambda x: jax.vmap(lambda y: y + jnp.arange(bound))(x))(comment_starts)
-        selected_regions = jax.vmap(
-            lambda data_row, indices_row: jax.vmap(
-                lambda idx: data_row[idx])
-            (indices_row)
-        )(probs_at_targets, selected_indices)
+        probs = jnp.where(comment_mask, probs_at_targets, 1.0)
 
         # jax.debug.print("probs_at_targets={val}", val=probs_at_targets[0])
         # jax.debug.print("logprobs={val}", val=logprobs[0])
         # jax.debug.print("logprobs_at_targets={val}", val=logprobs_at_targets[0])
-        jax.debug.print("selected_regions={val}", val=selected_regions.shape)
+        jax.debug.print("selected_regions={val}", val=probs[0])
         # jax.debug.print("comment_starts={val1}\ncomment_ends={val2}", val1=comment_starts[0], val2=comment_ends[0])
 
         return -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch)

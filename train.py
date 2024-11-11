@@ -510,8 +510,6 @@ class Model:
 
         # average confidence for each prints in sequence
         avg_p_answer:f32[b"batch/d"] = jnp.mean(p_answer, axis=-1)
-        jax.debug.print("avg_confidence={val}", val=avg_p_answer)
-        jax.debug.print("avg_final_char_confidence={val}", val=avg_last_char_probs)
 
         synth_metrics = SyntheticMetrics(
             avg_confidence=avg_p_answer,
@@ -565,13 +563,6 @@ class Metrics:
     grad_norm: f32[b""]
     raw_grad_norm: f32[b""]
 
-    # TODO: Track average confidence (?)
-    # TODO: Track P(correct answer) for print string commetns 
-        # How do we assess that across multiple examples with several tokens (>20% of them being related to the answer)
-        # # correct answer being the entire substring uptil the new line
-
-
-
 
 @dataclass(frozen=True)
 class TrainingHparams:
@@ -612,13 +603,13 @@ def training_step(
     h: Hparams,
     hparams: TrainingHparams,
     batch: TokenBatch,
-) -> Tuple[Any, Metrics]:
+) -> Tuple[Any, Metrics, SyntheticMetrics]:
     @partial(
         shardtypes.typed_shard_map, check_rep=False
     )  # check_rep=False for https://github.com/google/jax/issues/20335
     def sharded_step(
         state: State, step: u32[b""], batch: TokenBatch
-    ) -> Tuple[State, Metrics]:
+    ) -> Tuple[State, Metrics, SyntheticMetrics]:
         ( loss, synth_metrics ), grad = jax.value_and_grad(lambda weights: weights.loss(h, batch), has_aux=True)(
             state.weights
         )
@@ -738,7 +729,7 @@ def training_step(
             grad_norm=global_norm * rescale,
             raw_grad_norm=global_norm,
         )
-        return new_state, metrics
+        return new_state, metrics, synth_metrics
 
     return sharded_step(state, step, batch)
 
@@ -852,7 +843,7 @@ def main_contained(config, logger):
                 training_io.start_profile()
                 profile_start = time.time()
 
-            state, output = c_training_step(state, jnp.uint32(step), loader.load(step))
+            state, output, synth_metrics = c_training_step(state, jnp.uint32(step), loader.load(step))
 
             # Run profile for two steps, to include data loading time in between them.
             if training_io.is_device_0() and step == start_step + 2:
@@ -884,6 +875,7 @@ def main_contained(config, logger):
                     )
                 else:
                     cum_metrics = output
+                training_io.log(step, logger, synth_metrics)
                 training_io.log(step, logger, cum_metrics)
                 cum_metrics = output
             else:

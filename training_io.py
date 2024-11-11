@@ -41,16 +41,22 @@ def log(step: int, logger: Logger, output: PyTree):
   """Logs the output of a training step. The output must be a PyTree of f32 arrays."""
 
   if is_device_0():
-    metrics = {}
     metrics_dict = {}
     for path, arr in jax.tree_util.tree_leaves_with_path(output):
       path = jax.tree_util.keystr(path)
       arr = jax.device_get(arr)
+
       if arr.shape == () and arr.dtype == jnp.float32:
         if logger:
           logger.report_scalar(
             title=path, series=path, value=arr, iteration=step)
         metrics_dict[path] = float(arr)
+      elif arr.ndim == 1 and arr.dtype == jnp.float32:
+        if logger:
+          for i, v in enumerate(arr):
+            logger.report_scalar(
+                title=path, series=f"batch_{i}_{path}", value=v, iteration=step)
+        metrics_dict[path] = arr.tolist()  
       elif arr.dtype == jnp.float32:
         if logger:
           logger.report_histogram(

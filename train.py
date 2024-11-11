@@ -204,6 +204,9 @@ def get_parameterization(style: str, fully_aligned: bool = True):
 
     return Parameterization(**params)
 
+class SyntheticMetrics:
+    avg_confidence: f32[b"batch"]
+    avg_final_char_confidence: f32[b"batch"]
 
 @pytree_dataclass
 class Model:
@@ -457,7 +460,7 @@ class Model:
         return logits
 
     @typechecked
-    def loss(self, h: Hparams, batch: TokenBatch) -> f32[b""]:
+    def loss(self, h: Hparams, batch: TokenBatch) -> Tuple[f32[b""], SyntheticMetrics]:
         # Given sequence-packed targets:
         #   [[1, 2], [3, 4, 5], [6, 7, 8, 9]]
         # we want inputs:
@@ -486,17 +489,36 @@ class Model:
 
         probs_at_targets = jnp.exp(logprobs_at_targets)
 
-        comment_mask: bool_[b"batch/d len"] = batch.masks
+        batch, length = probs_at_targets.shape
+        comment_starts: u32[b"batch/d n_print"] = batch.comment_starts
+        comment_ends: u32[b"batch/d n_print"] = batch.comment_ends
 
-        probs = jnp.where(comment_mask, probs_at_targets, 1.0)
+        assert comment_starts[:, -1] != comment_ends[:, -1], "Comment not properly set" 
 
-        # jax.debug.print("probs_at_targets={val}", val=probs_at_targets[0])
-        # jax.debug.print("logprobs={val}", val=logprobs[0])
-        # jax.debug.print("logprobs_at_targets={val}", val=logprobs_at_targets[0])
-        jax.debug.print("selected_regions={val}", val=probs[0])
-        # jax.debug.print("comment_starts={val1}\ncomment_ends={val2}", val1=comment_starts[0], val2=comment_ends[0])
+        batch_indices = jnp.arange(batch)[:, jnp.newaxis]  # (batch, 1)
+        last_char_probs = probs_at_targets[batch_indices, comment_ends]
+        avg_last_char_probs:f32[b"batch"] = jnp.mean(last_char_probs, axis=-1)
 
-        return -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch)
+        comment_mask = jax.vmap(
+            lambda starts_row, ends_row: jax.vmap(
+                lambda start, end: (jnp.arange(length) >= start) & (jnp.arange(length) < end)
+            )(starts_row, ends_row)
+        )(comment_starts, comment_ends)
+
+        probs_at_targets = probs_at_targets[:, jnp.newaxis, :]
+
+        p_answer = jnp.prod(jnp.where(comment_mask, probs_at_targets, 1), axis=-1, keepdims=True)
+
+        # average confidence for each prints in sequence
+        avg_p_answer:f32[b"batch"] = jnp.mean(p_answer, axis=-1)
+        jax.debug.print("avg_p_answer={val}", val=avg_p_answer)
+
+        synth_metrics = SyntheticMetrics(
+            avg_confidence=avg_p_answer,
+            avg_final_char_confidence=avg_last_char_probs 
+        )
+
+        return ( -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch), synth_metrics )
 
 
 @pytree_dataclass
@@ -549,6 +571,8 @@ class Metrics:
         # # correct answer being the entire substring uptil the new line
 
 
+
+
 @dataclass(frozen=True)
 class TrainingHparams:
     adam_b1: float
@@ -595,7 +619,7 @@ def training_step(
     def sharded_step(
         state: State, step: u32[b""], batch: TokenBatch
     ) -> Tuple[State, Metrics]:
-        loss, grad = jax.value_and_grad(lambda weights: weights.loss(h, batch))(
+        ( loss, synth_metrics ), grad = jax.value_and_grad(lambda weights: weights.loss(h, batch), has_aux=True)(
             state.weights
         )
         # Gradients have already been reduced across chips because the gradient of the weight `all_gather`

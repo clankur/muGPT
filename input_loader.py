@@ -59,7 +59,8 @@ class TokenBatch:
 
     targets: u32["batch/d len"]
     is_seq_start: bool_["batch/d len"]
-    masks: bool_["batch/d len"]
+    comment_starts: u32["batch/d n_prints"]
+    comment_ends: u32["batch/d n_prints"]
 
 @dataclass(frozen=True)
 class FlatTokensParams:
@@ -455,7 +456,7 @@ class SyntheticDataLoader:
         random.seed(self.base_seed + step)
 
         shape = (self.batch_size, self.max_seq_len)
-        tokens, comment_mask = next(self.iterator)
+        tokens, comment_starts, comment_ends = next(self.iterator)
         is_seq_start = jnp.zeros((shape), dtype=jnp.bool)
         is_seq_start = is_seq_start.at[:, 0].set(1)
 
@@ -470,7 +471,7 @@ class SyntheticDataLoader:
             shape, self.sharding, functools.partial(get_shard, is_seq_start)
         )
 
-        return TokenBatch(tokens, is_seq_start, comment_mask)
+        return TokenBatch(tokens, is_seq_start, comment_starts, comment_ends)
 
 
 def get_loader(

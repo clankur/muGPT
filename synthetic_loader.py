@@ -58,10 +58,10 @@ class SyntheticGenerator:
         self.variables = {}
         self.trie = VariableTrie()
         self.seq_length = seq_length
-        self.min_padding = int(seq_length * 0.025) 
+        self.min_padding = int(seq_length * 0.1)
         self.tokenizer = SyntheticTokenizer()
         self.batch_size = batch_size
-        self.print_freq = 0.03
+        self.print_freq = 0.02
         random.seed(seed)
 
     def generate_random_variable(self):
@@ -95,28 +95,39 @@ class SyntheticGenerator:
     def get_next_sequence(self):
         sequence = ""
         total_len = self.seq_length - self.min_padding
-        num_prints = int(total_len * self.print_freq) - 1 
-
-        random_positions = sorted(random.sample(range(1, total_len), num_prints))
-
+        num_prints = int( self.print_freq * total_len )
         comment_start = jnp.zeros((num_prints), dtype=jnp.uint32)
         comment_end = jnp.zeros((num_prints), dtype=jnp.uint32)
+        
+        # Predetermine random positions for print statements
+        random_positions = sorted(random.sample(range(1, total_len), num_prints))
+        
+        current_len = 0  # Track current sequence length
 
-        pos = 0  # Track index in random_positions
-        while len(sequence) < total_len:
-            if pos < num_prints and random_positions[pos] <= len(sequence):
-                print_stmnt = self.generate_random_print()
-                sequence += print_stmnt
-                region = (sequence.rfind(" ")+1, len(sequence)+1)
-                comment_start = comment_start.at[pos].set(region[0])
-                comment_end = comment_end.at[pos].set(region[1])
-                pos += 1
-            else:
-                assignment = self.generate_assignment()
-                sequence += assignment
+        for pos, target_pos in enumerate(random_positions):
+            while current_len < target_pos:
+                stmnt = self.generate_assignment()
+                sequence += stmnt + "\n"  
+                current_len += len(stmnt) + 1  
 
-            sequence += "\n"
-        # assert pos == num_prints, "Not all comment positions were set properly."
+            stmnt = self.generate_random_print()
+            sequence += stmnt + "\n"  
+            region = (sequence.rfind("#") + 2, len(sequence) + 1)
+            
+            comment_start = comment_start.at[pos].set(region[0])
+            comment_end = comment_end.at[pos].set(region[1])
+            current_len += len(stmnt) + 1  
+
+        while current_len < total_len - self.min_padding:
+            stmnt = self.generate_assignment()
+            sequence += stmnt + "\n"  
+            current_len += len(stmnt) + 1  
+
+        if len(sequence) > self.seq_length:
+            print(f"truncating {sequence[self.seq_length:]=}")
+            sequence = sequence[:self.seq_length]
+
+        assert comment_start[-1] != comment_end[-1], f"Not all comment positions were set properly. \n{comment_start=}\n{comment_end=}"
         return sequence, comment_start, comment_end
 
     def reset_state(self):

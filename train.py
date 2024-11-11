@@ -204,9 +204,10 @@ def get_parameterization(style: str, fully_aligned: bool = True):
 
     return Parameterization(**params)
 
+@pytree_dataclass
 class SyntheticMetrics:
-    avg_confidence: f32[b"batch"]
-    avg_final_char_confidence: f32[b"batch"]
+    avg_confidence: f32[b"batch/d"]
+    avg_final_char_confidence: f32[b"batch/d"]
 
 @pytree_dataclass
 class Model:
@@ -489,15 +490,13 @@ class Model:
 
         probs_at_targets = jnp.exp(logprobs_at_targets)
 
-        batch, length = probs_at_targets.shape
+        batch_size, length = probs_at_targets.shape
         comment_starts: u32[b"batch/d n_print"] = batch.comment_starts
         comment_ends: u32[b"batch/d n_print"] = batch.comment_ends
 
-        assert comment_starts[:, -1] != comment_ends[:, -1], "Comment not properly set" 
-
-        batch_indices = jnp.arange(batch)[:, jnp.newaxis]  # (batch, 1)
+        batch_indices = jnp.arange(batch_size)[:, jnp.newaxis]  # (batch, 1)
         last_char_probs = probs_at_targets[batch_indices, comment_ends]
-        avg_last_char_probs:f32[b"batch"] = jnp.mean(last_char_probs, axis=-1)
+        avg_last_char_probs:f32[b"batch/d"] = jnp.mean(last_char_probs, axis=-1)
 
         comment_mask = jax.vmap(
             lambda starts_row, ends_row: jax.vmap(
@@ -507,11 +506,12 @@ class Model:
 
         probs_at_targets = probs_at_targets[:, jnp.newaxis, :]
 
-        p_answer = jnp.prod(jnp.where(comment_mask, probs_at_targets, 1), axis=-1, keepdims=True)
+        p_answer = jnp.prod(jnp.where(comment_mask, probs_at_targets, 1), axis=-1)
 
         # average confidence for each prints in sequence
-        avg_p_answer:f32[b"batch"] = jnp.mean(p_answer, axis=-1)
-        jax.debug.print("avg_p_answer={val}", val=avg_p_answer)
+        avg_p_answer:f32[b"batch/d"] = jnp.mean(p_answer, axis=-1)
+        jax.debug.print("avg_confidence={val}", val=avg_p_answer)
+        jax.debug.print("avg_final_char_confidence={val}", val=avg_last_char_probs)
 
         synth_metrics = SyntheticMetrics(
             avg_confidence=avg_p_answer,

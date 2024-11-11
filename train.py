@@ -206,8 +206,8 @@ def get_parameterization(style: str, fully_aligned: bool = True):
 
 @pytree_dataclass
 class SyntheticMetrics:
-    avg_confidence: f32[b"batch/d"]
-    avg_final_char_confidence: f32[b"batch/d"]
+    avg_confidence: f32[b""]
+    avg_final_char_confidence: f32[b""]
 
 @pytree_dataclass
 class Model:
@@ -496,7 +496,7 @@ class Model:
 
         batch_indices = jnp.arange(batch_size)[:, jnp.newaxis]  # (batch, 1)
         last_char_probs = probs_at_targets[batch_indices, comment_ends]
-        avg_last_char_probs:f32[b"batch/d"] = jnp.mean(last_char_probs, axis=-1)
+        avg_last_char_probs:f32[b""] = jnp.mean(last_char_probs)
 
         comment_mask = jax.vmap(
             lambda starts_row, ends_row: jax.vmap(
@@ -509,7 +509,7 @@ class Model:
         p_answer = jnp.prod(jnp.where(comment_mask, probs_at_targets, 1), axis=-1)
 
         # average confidence for each prints in sequence
-        avg_p_answer:f32[b"batch/d"] = jnp.mean(p_answer, axis=-1)
+        avg_p_answer:f32[b""] = jnp.mean(p_answer)
 
         synth_metrics = SyntheticMetrics(
             avg_confidence=avg_p_answer,

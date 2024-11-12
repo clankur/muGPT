@@ -36,7 +36,7 @@ class VariableTrie:
 
 class SyntheticTokenizer:
     def __init__(self):
-        self.vocab = list("abcdefghijklmnopqrstuvwxyz=()#0123456789+-*/\n ") + [
+        self.vocab = list(string.ascii_lowercase + "=()#" + string.digits + "+-*/\n' ") + [
             "[PAD]",
         ]  # add "[END_OF_TEXT]" as max token id?
         self.token_to_id = {char: idx for idx, char in enumerate(self.vocab)}
@@ -61,61 +61,98 @@ class SyntheticGenerator:
         self.min_padding = int(seq_length * 0.1)
         self.tokenizer = SyntheticTokenizer()
         self.batch_size = batch_size
-        self.print_freq = 0.02
+        self.print_freq = 0.04
         random.seed(seed)
 
     def generate_random_variable(self):
         """Generate a random lowercase variable name, randomly use last 3 entries as a prefix"""
         return self.trie.generate_random_variable()
+    
+    def generate_random_value (self) -> int | str:
+       if random.random() < 0.5:
+           return random.randint(1, 999)
+       else:
+           length = random.randint(1, 4)
+           letters = string.ascii_lowercase 
+           return ''.join(random.choice(letters) for _ in range(length))
 
     def generate_assignment(self):
         """Generate an assignment statement for a new or existing variable."""
         # If no variables exist or if the random chance dictates, generate a new variable
         if not self.variables or random.random() < 0.5:
             var = self.generate_random_variable()
-            value = random.randint(1, 999)
+            value = self.generate_random_value()
             self.variables[var] = value
         else:
             var = random.choice(list(self.variables.keys()))
             if random.random() < 0.2:  # 20% chance to assign a new value
-                value = random.randint(1, 100)
+                value = self.generate_random_value()
                 self.variables[var] = value
             else:  # 80% chance to assign value of another variable
                 value = random.choice(list(self.variables.keys()))
                 self.variables[var] = self.variables[value]
-
+        if type(value) == str and self.variables[var] == value :
+            value = f"'{value}'"
         return f"{var}={value}"
 
     def generate_random_print(self):
         var = random.choice(list(self.variables.keys()))
         value =  self.variables[var]
+        if type(value) == str:
+            value = f"'{value}'"
         return f"print({var}) # {value}"
-
+    
+    def generate_eval_stmnt(self):
+        var = random.choice(list(self.variables.keys()))
+        value =  self.variables[var]
+        if type(value) == str:
+            value = f"'{value}'"
+        return f"eval({var}) # {value}"
+    
+    def generate_repeat_stmnt(self):
+        choices = [ ( key, value ) for ( key, value ) in self.variables.items() if isinstance(value, str)]
+        if not choices:
+            return ""
+        var, value = random.choice(choices)
+        value = value + value
+        return f"repeat({var}) # '{value}'"
+        
     def get_next_sequence(self):
         sequence = ""
         total_len = self.seq_length - self.min_padding
-        num_prints = int( self.print_freq * total_len )
-        comment_start = jnp.zeros((num_prints), dtype=jnp.uint32)
-        comment_end = jnp.zeros((num_prints), dtype=jnp.uint32)
+        num_func_calls = int( self.print_freq * total_len )
+        comment_start = jnp.zeros((num_func_calls), dtype=jnp.uint32)
+        comment_end = jnp.zeros((num_func_calls), dtype=jnp.uint32)
         
         # Predetermine random positions for print statements
-        random_positions = sorted(random.sample(range(1, total_len), num_prints))
+        functions = [
+            self.generate_random_print,
+            # self.generate_eval_stmnt,
+            self.generate_repeat_stmnt
+        ]
+        random_positions = sorted(random.sample(range(1, total_len), num_func_calls))
+        random_positions = sorted(
+            (pos, random.choice(functions)) 
+            for pos in random.sample(range(1, total_len), num_func_calls)
+        )
         
         current_len = 0  # Track current sequence length
 
-        for pos, target_pos in enumerate(random_positions):
+        for pos, ( target_pos, func ) in enumerate(random_positions):
             while current_len < target_pos:
                 stmnt = self.generate_assignment()
                 sequence += stmnt + "\n"  
                 current_len += len(stmnt) + 1  
 
-            stmnt = self.generate_random_print()
-            sequence += stmnt + "\n"  
-            region = (sequence.rfind("#") + 2, len(sequence) + 1)
+            stmnt = func()
+            if stmnt: 
+                # stmnt = self.generate_random_print()
+                sequence += stmnt + "\n"  
+                region = (sequence.rfind("#") + 2, len(sequence) + 1)
             
-            comment_start = comment_start.at[pos].set(region[0])
-            comment_end = comment_end.at[pos].set(region[1])
-            current_len += len(stmnt) + 1  
+                comment_start = comment_start.at[pos].set(region[0])
+                comment_end = comment_end.at[pos].set(region[1])
+                current_len += len(stmnt) + 1  
 
         while current_len < total_len - self.min_padding:
             stmnt = self.generate_assignment()
@@ -123,10 +160,10 @@ class SyntheticGenerator:
             current_len += len(stmnt) + 1  
 
         if len(sequence) > self.seq_length:
-            print(f"truncating {sequence[self.seq_length:]=}")
+            # print(f"truncating {sequence[self.seq_length:]=}")
             sequence = sequence[:self.seq_length]
-
         assert comment_start[-1] != comment_end[-1], f"Not all comment positions were set properly. \n{comment_start=}\n{comment_end=}"
+        print(sequence)
         return sequence, comment_start, comment_end
 
     def reset_state(self):

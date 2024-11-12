@@ -6,7 +6,7 @@ defaults:
 num_hosts: 1
 
 mesh:
-  d: 1 
+  d: 8 
   t: 1
 
 training:
@@ -25,7 +25,7 @@ model:
   d_head: 32 
   layers: 1
   d_ff: 512 
-  vocab: 47 
+  vocab: 48 
   rope_max_timescale: 10000
   a_attn: 1.
   a_output: 1.

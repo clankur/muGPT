@@ -76,7 +76,6 @@ class SyntheticGenerator:
             value = random.randint(1, 999)
             self.variables[var] = value
         else:
-            # Choose an existing variable
             var = random.choice(list(self.variables.keys()))
             if random.random() < 0.2:  # 20% chance to assign a new value
                 value = random.randint(1, 100)
@@ -132,7 +131,7 @@ class SyntheticGenerator:
 
     def reset_state(self):
         """Reset stateful attributes to ensure independence between batches."""
-        self.variables = {}  # Clear variable assignments
+        self.variables = {} 
         self.trie = VariableTrie()
 
     def generate_batch(

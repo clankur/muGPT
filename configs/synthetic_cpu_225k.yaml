@@ -25,7 +25,7 @@ model:
   d_head: 32 
   layers: 1
   d_ff: 512 
-  vocab: 48 
+  vocab: 49 
   rope_max_timescale: 10000
   a_attn: 1.
   a_output: 1.

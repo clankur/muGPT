@@ -495,7 +495,7 @@ class Model:
         comment_ends: u32[b"batch/d n_print"] = batch.comment_ends
 
         batch_indices = jnp.arange(batch_size)[:, jnp.newaxis]  # (batch, 1)
-        last_char_probs = probs_at_targets[batch_indices, comment_ends]
+        last_char_probs = probs_at_targets[batch_indices, comment_ends-1]
         avg_last_char_probs:f32[b""] = jnp.mean(last_char_probs)
 
         comment_mask = jax.vmap(

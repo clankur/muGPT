@@ -159,7 +159,6 @@ class SyntheticGenerator:
             current_len += len(stmnt) + 1  
 
         if len(sequence) > self.seq_length:
-            # print(f"truncating {sequence[self.seq_length:]=}")
             sequence = sequence[:self.seq_length]
         assert comment_start[-1] != comment_end[-1], f"Not all comment positions were set properly. \n{comment_start=}\n{comment_end=}"
         return sequence, comment_start, comment_end

@@ -207,6 +207,7 @@ def get_parameterization(style: str, fully_aligned: bool = True):
 @pytree_dataclass
 class SyntheticMetrics:
     avg_confidence: f32[b""]
+    avg_char_confidence: f32[b""]
     avg_final_char_confidence: f32[b""]
 
 @pytree_dataclass
@@ -511,11 +512,15 @@ class Model:
         # average confidence for each prints in sequence
         avg_p_answer:f32[b""] = jnp.mean(p_answer)
 
+        average_char_confidence = jnp.average(jnp.where(comment_mask, probs_at_targets, 0))
+
         synth_metrics = SyntheticMetrics(
             avg_confidence=avg_p_answer,
+            avg_char_confidence=average_char_confidence,
             avg_final_char_confidence=avg_last_char_probs 
         )
 
+        
         return ( -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch), synth_metrics )
 
 

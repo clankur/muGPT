@@ -208,6 +208,9 @@ def get_parameterization(style: str, fully_aligned: bool = True):
 class SyntheticMetrics:
     avg_confidence: f32[b""]
     avg_char_confidence: f32[b""]
+    max_char_confidence: f32[b""]
+    min_char_confidence : f32[b""]
+    avg_start_char_confidence: f32[b""]
     avg_final_char_confidence: f32[b""]
 
 @pytree_dataclass
@@ -496,6 +499,8 @@ class Model:
         comment_ends: u32[b"batch/d n_print"] = batch.comment_ends
 
         batch_indices = jnp.arange(batch_size)[:, jnp.newaxis]  # (batch, 1)
+        start_char_probs = probs_at_targets[batch_indices, comment_starts]
+        avg_start_char_probs:f32[b""] = jnp.mean(start_char_probs)
         last_char_probs = probs_at_targets[batch_indices, comment_ends-1]
         avg_last_char_probs:f32[b""] = jnp.mean(last_char_probs)
 
@@ -512,14 +517,20 @@ class Model:
         # average confidence for each prints in sequence
         avg_p_answer:f32[b""] = jnp.mean(p_answer)
 
-        average_char_confidence = jnp.average(jnp.where(comment_mask, probs_at_targets, 0))
+        total_tokens = jnp.sum(comment_ends - comment_starts + 1)
+        comment_probs = jnp.where(comment_mask, probs_at_targets, 0)
+        average_char_confidence = jnp.sum(comment_probs) / total_tokens
+        max_char_confidence = jnp.max(comment_probs)
+        min_char_confidence = jnp.min(comment_probs)
 
         synth_metrics = SyntheticMetrics(
             avg_confidence=avg_p_answer,
+            max_char_confidence=max_char_confidence,
+            min_char_confidence=min_char_confidence, 
             avg_char_confidence=average_char_confidence,
+            avg_start_char_probs=avg_start_char_probs,
             avg_final_char_confidence=avg_last_char_probs 
         )
-
         
         return ( -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch), synth_metrics )
 

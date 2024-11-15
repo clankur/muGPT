@@ -31,7 +31,7 @@ path_map = {
   "avg_confidence": ("Avg Total Confidence", "Average total confidence" ),
   "avg_char_confidence": ( "Character confidence", "Average char confidence" ),
   "max_char_confidence": ( "Character confidence", "Max char confidence" ),
-  "max_char_confidence": ( "Character confidence", "Min char confidence" ),
+  "min_char_confidence": ( "Character confidence", "Min char confidence" ),
   "avg_start_char_confidence": ("Character confidence", "Start character confidence"),
   "avg_final_char_confidence": ("Character confidence", "Final character confidence")
 }  

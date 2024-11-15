@@ -1,11 +1,8 @@
-# %%
 import jax.numpy as jnp
 from typing import Tuple, List, Optional
 import random
 import string
 from collections import defaultdict, deque
-
-# %%
 
 
 class TrieNode:
@@ -112,6 +109,7 @@ class SyntheticGenerator:
             "eval": lambda s: s,
             "rep": lambda s: s * 2
         } 
+        void_functions = ["print", "eval"]
         current_len = len(sequence) 
 
         def generate_func ():
@@ -123,41 +121,32 @@ class SyntheticGenerator:
             return generate_functions[func_name]
 
         def call_func (func_name: str, var: Optional[str]=None):
-            nonlocal current_len, sequence
-            choices = [ ( key, value ) for ( key, value ) in self.variables.items() if isinstance(value, str) and len(value) < self.pattern_cap] 
-            if len(choices) < 2:
-               stmnt = self.generate_assignment("str") + "\n"
-               current_len += len(stmnt) 
-               sequence += stmnt
-               choices = [ ( key, value ) for ( key, value ) in self.variables.items() if isinstance(value, str)]
+            nonlocal current_len, sequence, void_functions
+            if var: 
+                value = self.variables[var]
+            else:
+                choices = [ ( key, value ) for ( key, value ) in self.variables.items() if isinstance(value, str) and len(value) < self.pattern_cap] 
+                if len(choices) < 2:
+                    stmnt = self.generate_assignment("str") + "\n"
+                    current_len += len(stmnt) 
+                    sequence += stmnt
+                    choices = [ ( key, value ) for ( key, value ) in self.variables.items() if isinstance(value, str)]
+                var, value = random.choice(choices)
             
-            if not var:
-                var = random.choice(choices)
+            if func_name in void_functions:
+                # TODO: exclude print statements from loss
+                if type(value) == str:
+                    value = f"'{value}'"
+                return f"{func_name}({var}) # {value}", None
 
-            select_var, select_value = random.choice(choices)
             new_var = self.generate_random_variable()
-            self.variables[new_var] = generate_functions[func_name](select_value)
-
-            return f"{new_var}={func_name}({select_var}) ", new_var 
-
-        def generate_print(var=None, eval_mode=False):
-            # TODO: exclude print statements from loss
-            if not var:
-                var = random.choice(list(self.variables.keys()))
-            func_name = "eval" if eval_mode else "print"
-            value =  self.variables[var]
-            if type(value) == str:
-                value = f"'{value}'"
-            return f"{func_name}({var}) # {value}"
-
-        void_functions = [
-            generate_print,
-        ]
+            self.variables[new_var] = generate_functions[func_name](value)
+            return f"{new_var}={func_name}({var})", new_var 
 
         for i in range(3):
             generate_func()
-        
-        required_calls = list(generate_functions.keys()) * 3
+     
+        required_calls = [func for func in generate_functions.keys() for _ in range(3) if func not in void_functions]
         required_calls += random.choices(list(generate_functions.keys()), k=n_gen_calls - len(required_calls))
         random.shuffle(required_calls)
 
@@ -171,11 +160,10 @@ class SyntheticGenerator:
                 stmnt = self.generate_assignment()
                 sequence += stmnt + "\n"  
                 current_len += len(stmnt) + 1  
-            if func in generate_functions:
-                stmnt, var = call_func(func)
-                stmnt += "\n" + generate_print(var)
-            else:
-                stmnt = func()
+
+            stmnt, var = call_func(func)
+            if func not in void_functions:
+                stmnt += "\n" + call_func("print", var)[0]
             sequence += stmnt + "\n"  
             region = (sequence.rfind("#") + 2, len(sequence))
         
@@ -229,8 +217,3 @@ class SyntheticGenerator:
 
     def __next__(self):
         return self.generate_batch()
-
-
-# %%
-
-# %%

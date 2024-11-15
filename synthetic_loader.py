@@ -59,11 +59,12 @@ class SyntheticGenerator:
         self.funcs = {}
         self.trie = VariableTrie()
         self.seq_length = seq_length
-        self.min_padding = int(seq_length * 0.1)
+        self.min_padding = int(seq_length * 0.25)
         self.tokenizer = SyntheticTokenizer()
         self.batch_size = batch_size
-        self.void_func_freq = 0.02
+        self.void_func_freq = 0.005
         self.func_freq = 0.025
+        self.pattern_cap = 5
         random.seed(seed)
 
     def generate_random_variable(self):
@@ -97,20 +98,7 @@ class SyntheticGenerator:
             value = f"'{value}'"
         return f"{var}={value}"
 
-    def generate_random_print(self):
-        var = random.choice(list(self.variables.keys()))
-        value =  self.variables[var]
-        if type(value) == str:
-            value = f"'{value}'"
-        return f"print({var}) # {value}"
-    
-    def generate_eval_stmnt(self):
-        var = random.choice(list(self.variables.keys()))
-        value =  self.variables[var]
-        if type(value) == str:
-            value = f"'{value}'"
-        return f"eval({var}) # {value}"
-    
+
     def get_next_sequence(self):
         sequence =  ""
         total_len = self.seq_length - self.min_padding
@@ -120,10 +108,12 @@ class SyntheticGenerator:
         comment_start = jnp.zeros((n_func_calls), dtype=jnp.uint32)
         comment_end = jnp.zeros((n_func_calls), dtype=jnp.uint32)
         generate_functions = {
+            "print": lambda s: s,
+            "eval": lambda s: s,
             "rep": lambda s: s * 2
         } 
-        
-        current_len = len(sequence)  # Track current sequence length
+        current_len = len(sequence) 
+
         def generate_func ():
             func_name = self.generate_random_variable()  
 
@@ -132,45 +122,58 @@ class SyntheticGenerator:
             generate_functions[func_name] = lambda s: (s * n_repeat_input) + chars
             return generate_functions[func_name]
 
-        def call_func (func_name):
+        def call_func (func_name: str, var: Optional[str]=None):
             nonlocal current_len, sequence
-            choices = [ ( key, value ) for ( key, value ) in self.variables.items() if isinstance(value, str)]
-            if not choices:
+            choices = [ ( key, value ) for ( key, value ) in self.variables.items() if isinstance(value, str) and len(value) < self.pattern_cap] 
+            if len(choices) < 2:
                stmnt = self.generate_assignment("str") + "\n"
                current_len += len(stmnt) 
                sequence += stmnt
                choices = [ ( key, value ) for ( key, value ) in self.variables.items() if isinstance(value, str)]
+            
+            if not var:
+                var = random.choice(choices)
 
             select_var, select_value = random.choice(choices)
             new_var = self.generate_random_variable()
-            new_value = self.variables[new_var] = generate_functions[func_name](select_value)
+            self.variables[new_var] = generate_functions[func_name](select_value)
 
-            return f"{new_var}={func_name}({select_var}) # '{new_value}'"
+            return f"{new_var}={func_name}({select_var}) ", new_var 
 
-                
-        # Predetermine random positions for print statements
+        def generate_print(var=None, eval_mode=False):
+            # TODO: exclude print statements from loss
+            if not var:
+                var = random.choice(list(self.variables.keys()))
+            func_name = "eval" if eval_mode else "print"
+            value =  self.variables[var]
+            if type(value) == str:
+                value = f"'{value}'"
+            return f"{func_name}({var}) # {value}"
+
         void_functions = [
-            self.generate_random_print,
-            self.generate_eval_stmnt
+            generate_print,
         ]
 
         for i in range(3):
             generate_func()
         
-        required_calls = [func for func in generate_functions.keys() for _ in range(2)]
+        required_calls = list(generate_functions.keys()) * 3
         required_calls += random.choices(list(generate_functions.keys()), k=n_gen_calls - len(required_calls))
+        random.shuffle(required_calls)
 
         positions = random.sample(range(1, total_len), n_gen_calls)
         gen_positions = [(pos, func) for pos, func in zip(positions, required_calls)]
         void_positions = [ (pos, random.choice(void_functions)) for pos in random.sample(range(1, total_len), n_void_calls) ]
         random_positions = sorted(gen_positions + void_positions, key=lambda x: x[0])
+
         for i, ( target_pos, func ) in enumerate(random_positions):
             while current_len < target_pos:
                 stmnt = self.generate_assignment()
                 sequence += stmnt + "\n"  
                 current_len += len(stmnt) + 1  
             if func in generate_functions:
-                stmnt = call_func(func)
+                stmnt, var = call_func(func)
+                stmnt += "\n" + generate_print(var)
             else:
                 stmnt = func()
             sequence += stmnt + "\n"  
@@ -185,8 +188,8 @@ class SyntheticGenerator:
             current_len += len(stmnt) + 1  
 
         if len(sequence) > self.seq_length:
-            print(len(sequence))
-            sequence = sequence[:self.seq_length]
+            sequence = sequence[:sequence[:self.seq_length].rfind('\n') + 1]
+
         assert comment_start[-1] != comment_end[-1], f"Not all comment positions were set properly. \n{comment_start=}\n{comment_end=}"
         return sequence, comment_start, comment_end
 
@@ -227,5 +230,7 @@ class SyntheticGenerator:
     def __next__(self):
         return self.generate_batch()
 
+
+# %%
 
 # %%

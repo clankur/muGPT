@@ -1,3 +1,4 @@
+import math
 import jax.numpy as jnp
 from typing import Tuple, List, Optional
 import random
@@ -33,7 +34,9 @@ class VariableTrie:
 
 class SyntheticTokenizer:
     def __init__(self):
-        self.vocab = list(string.ascii_lowercase + "=()#" + string.digits + "+-*/\n', ") + [
+        self.vocab = list(
+            string.ascii_lowercase + "=()#" + string.digits + "+-*/\n', "
+        ) + [
             "[PAD]",
         ]  # add "[END_OF_TEXT]" as max token id?
         self.token_to_id = {char: idx for idx, char in enumerate(self.vocab)}
@@ -67,16 +70,16 @@ class SyntheticGenerator:
     def generate_random_variable(self):
         """Generate a random lowercase variable name, randomly use last 3 entries as a prefix"""
         return self.trie.generate_random_variable()
-    
-    def generate_random_value (self, v_type) -> int | str:
-       if  v_type == 'int' or not v_type and random.random() < 0.5:
-           return random.randint(1, 999)
-       else:
-           length = random.randint(1, 3)
-           letters = string.ascii_lowercase 
-           return ''.join(random.choice(letters) for _ in range(length))
 
-    def generate_assignment(self, v_type:Optional[str]=None):
+    def generate_random_value(self, v_type) -> int | str:
+        if v_type == "int" or not v_type and random.random() < 0.5:
+            return random.randint(1, 999)
+        else:
+            length = random.randint(1, 3)
+            letters = string.ascii_lowercase
+            return "".join(random.choice(letters) for _ in range(length))
+
+    def generate_assignment(self, v_type: Optional[str] = None):
         """Generate an assignment statement for a new or existing variable."""
         # If no variables exist or if the random chance dictates, generate a new variable
         if not self.variables or v_type or random.random() < 0.5:
@@ -91,48 +94,91 @@ class SyntheticGenerator:
             else:  # 80% chance to assign value of another variable
                 value = random.choice(list(self.variables.keys()))
                 self.variables[var] = self.variables[value]
-        if type(value) == str and self.variables[var] == value :
+        if type(value) == str and self.variables[var] == value:
             value = f"'{value}'"
         return f"{var}={value}"
 
-
     def get_next_sequence(self):
-        sequence =  ""
+        sequence = ""
         total_len = self.seq_length - self.min_padding
-        n_gen_calls = int( self.func_freq * total_len )
-        n_void_calls = int( self.void_func_freq * total_len )
+        n_gen_calls = int(self.func_freq * total_len)
+        n_void_calls = int(self.void_func_freq * total_len)
         n_func_calls = n_void_calls + n_gen_calls
         comment_start = jnp.zeros((n_func_calls), dtype=jnp.uint32)
         comment_end = jnp.zeros((n_func_calls), dtype=jnp.uint32)
         generate_functions = {
             "print": lambda s: s,
             "eval": lambda s: s,
-            "rep": lambda s: s * 2
-        } 
+            # "rep": lambda s: s * 2
+        }
         void_functions = ["print", "eval"]
-        current_len = len(sequence) 
+        current_len = len(sequence)
 
-        def generate_func ():
-            func_name = self.generate_random_variable()  
+        def generate_func():
+            func_name = self.generate_random_variable()
 
-            n_repeat_input = random.randint(1, 3) 
-            chars = ''.join(random.sample(list(string.ascii_lowercase), random.randint(0, 2)))
-            generate_functions[func_name] = lambda s: (s * n_repeat_input) + chars
+            # Randomly choose function type
+            func_type = random.choice(["repeat", "map", "shift", "reverse"])
+            chars = "".join(
+                random.sample(list(string.ascii_lowercase), random.randint(0, 2))
+            )
+
+            if func_type == "repeat":
+                n_repeat_input = random.randint(1, 3)
+                generate_functions[func_name] = lambda s: (s * n_repeat_input) + chars
+
+            elif func_type == "shift":
+                shift_amount = random.randint(1, len(self.tokenizer.vocab) - 1)
+
+                def shift_func(s):
+                    result = ""
+                    for c in s:
+                        idx = string.ascii_lowercase.index(c)
+                        new_idx = (
+                            idx + shift_amount
+                        ) % 26  # length of lowercase alphabet
+                        result += string.ascii_lowercase[new_idx]
+                    return result + chars
+
+                generate_functions[func_name] = shift_func
+
+            elif func_type == "reverse":
+                generate_functions[func_name] = lambda s: s[::-1] + chars
+
+            else:
+                char_mapping = {
+                    c: random.choice(string.ascii_lowercase)
+                    for c in string.ascii_lowercase
+                }
+
+                def map_func(s):
+                    return "".join(char_mapping.get(c, c) for c in s) + chars
+
+                generate_functions[func_name] = map_func
+
             return generate_functions[func_name]
 
-        def call_func (func_name: str, var: Optional[str]=None):
+        def call_func(func_name: str, var: Optional[str] = None):
             nonlocal current_len, sequence, void_functions
-            if var: 
+            if var:
                 value = self.variables[var]
             else:
-                choices = [ ( key, value ) for ( key, value ) in self.variables.items() if isinstance(value, str) and len(value) < self.pattern_cap] 
+                choices = [
+                    (key, value)
+                    for (key, value) in self.variables.items()
+                    if isinstance(value, str) and len(value) < self.pattern_cap
+                ]
                 if len(choices) < 2:
                     stmnt = self.generate_assignment("str") + "\n"
-                    current_len += len(stmnt) 
+                    current_len += len(stmnt)
                     sequence += stmnt
-                    choices = [ ( key, value ) for ( key, value ) in self.variables.items() if isinstance(value, str)]
+                    choices = [
+                        (key, value)
+                        for (key, value) in self.variables.items()
+                        if isinstance(value, str)
+                    ]
                 var, value = random.choice(choices)
-            
+
             if func_name in void_functions:
                 # TODO: exclude print statements from loss
                 if type(value) == str:
@@ -141,49 +187,61 @@ class SyntheticGenerator:
 
             new_var = self.generate_random_variable()
             self.variables[new_var] = generate_functions[func_name](value)
-            return f"{new_var}={func_name}({var})", new_var 
+            return f"{new_var}={func_name}({var})", new_var
 
         for i in range(3):
             generate_func()
-     
-        required_calls = [func for func in generate_functions.keys() for _ in range(3) if func not in void_functions]
-        required_calls += random.choices(list(generate_functions.keys()), k=n_gen_calls - len(required_calls))
+
+        required_calls = [
+            func
+            for func in generate_functions.keys()
+            for _ in range(min(3, int(math.log2(total_len))))
+            if func not in void_functions
+        ]
+        required_calls += random.choices(
+            list(generate_functions.keys()), k=n_gen_calls - len(required_calls)
+        )
         random.shuffle(required_calls)
 
         positions = random.sample(range(1, total_len), n_gen_calls)
         gen_positions = [(pos, func) for pos, func in zip(positions, required_calls)]
-        void_positions = [ (pos, random.choice(void_functions)) for pos in random.sample(range(1, total_len), n_void_calls) ]
+        void_positions = [
+            (pos, random.choice(void_functions))
+            for pos in random.sample(range(1, total_len), n_void_calls)
+        ]
         random_positions = sorted(gen_positions + void_positions, key=lambda x: x[0])
 
-        for i, ( target_pos, func ) in enumerate(random_positions):
+        for i, (target_pos, func) in enumerate(random_positions):
             while current_len < target_pos:
                 stmnt = self.generate_assignment()
-                sequence += stmnt + "\n"  
-                current_len += len(stmnt) + 1  
+                sequence += stmnt + "\n"
+                current_len += len(stmnt) + 1
 
             stmnt, var = call_func(func)
             if func not in void_functions:
                 stmnt += "\n" + call_func("print", var)[0]
-            sequence += stmnt + "\n"  
+            sequence += stmnt + "\n"
             region = (sequence.rfind("#") + 2, len(sequence))
-        
+
             comment_start = comment_start.at[i].set(region[0])
             comment_end = comment_end.at[i].set(region[1])
-            current_len += len(stmnt) + 1  
+            current_len += len(stmnt) + 1
         while current_len < total_len - self.min_padding:
             stmnt = self.generate_assignment()
-            sequence += stmnt + "\n"  
-            current_len += len(stmnt) + 1  
+            sequence += stmnt + "\n"
+            current_len += len(stmnt) + 1
 
         if len(sequence) > self.seq_length:
-            sequence = sequence[:sequence[:self.seq_length].rfind('\n') + 1]
+            sequence = sequence[: sequence[: self.seq_length].rfind("\n") + 1]
 
-        assert comment_start[-1] != comment_end[-1], f"Not all comment positions were set properly. \n{comment_start=}\n{comment_end=}"
+        assert (
+            comment_start[-1] != comment_end[-1]
+        ), f"Not all comment positions were set properly. \n{comment_start=}\n{comment_end=}"
         return sequence, comment_start, comment_end
 
     def reset_state(self):
         """Reset stateful attributes to ensure independence between batches."""
-        self.variables = {} 
+        self.variables = {}
         self.trie = VariableTrie()
 
     def generate_batch(

@@ -103,13 +103,13 @@ class SyntheticGenerator:
         total_len = self.seq_length - self.min_padding
         n_gen_calls = int(self.func_freq * total_len)
         n_void_calls = int(self.void_func_freq * total_len)
-        n_func_calls = n_void_calls + n_gen_calls
-        comment_start = jnp.zeros((n_func_calls), dtype=jnp.uint32)
-        comment_end = jnp.zeros((n_func_calls), dtype=jnp.uint32)
+        n_eval_calls = int(n_void_calls / 3.0) + int(n_gen_calls / 3.0)
+        comment_start = jnp.zeros((n_eval_calls), dtype=jnp.uint32)
+        comment_end = jnp.zeros((n_eval_calls), dtype=jnp.uint32)
         generate_functions = {
             "print": lambda s: s,
             "eval": lambda s: s,
-            # "rep": lambda s: s * 2
+            "rep": lambda s: s * 2,
         }
         void_functions = ["print", "eval"]
         current_len = len(sequence)
@@ -192,40 +192,55 @@ class SyntheticGenerator:
         for i in range(3):
             generate_func()
 
-        required_calls = [
-            func
+        func_calls_print = [
+            (func, "print")
             for func in generate_functions.keys()
-            for _ in range(min(3, int(math.log2(total_len))))
+            for _ in range(max(3, int(math.log2(total_len) / len(generate_functions))))
             if func not in void_functions
         ]
-        required_calls += random.choices(
-            list(generate_functions.keys()), k=n_gen_calls - len(required_calls)
-        )
-        random.shuffle(required_calls)
+        random.shuffle(func_calls_print)
 
-        positions = random.sample(range(1, total_len), n_gen_calls)
-        gen_positions = [(pos, func) for pos, func in zip(positions, required_calls)]
+        func_calls_eval = [
+            (func, "eval")
+            for func in generate_functions.keys()
+            if func not in void_functions
+        ]
+        random.shuffle(func_calls_eval)
+
+        required_calls = func_calls_print + func_calls_eval
+        required_calls += random.choices(
+            [(func, "eval") for func in generate_functions.keys()],
+            k=int(n_eval_calls) - len(func_calls_eval),
+        )
+
+        positions = sorted(random.sample(range(1, total_len), len(required_calls)))
+        gen_positions = [
+            (pos, func, post_func)
+            for pos, (func, post_func) in zip(positions, required_calls)
+        ]
         void_positions = [
-            (pos, random.choice(void_functions))
+            (pos, "print", None)
             for pos in random.sample(range(1, total_len), n_void_calls)
         ]
         random_positions = sorted(gen_positions + void_positions, key=lambda x: x[0])
-
-        for i, (target_pos, func) in enumerate(random_positions):
+        eval_count = 0
+        for target_pos, func, post_func in random_positions:
             while current_len < target_pos:
                 stmnt = self.generate_assignment()
                 sequence += stmnt + "\n"
                 current_len += len(stmnt) + 1
 
             stmnt, var = call_func(func)
-            if func not in void_functions:
-                stmnt += "\n" + call_func("print", var)[0]
+            if post_func:
+                stmnt += "\n" + call_func(post_func, var)[0]
             sequence += stmnt + "\n"
-            region = (sequence.rfind("#") + 2, len(sequence))
-
-            comment_start = comment_start.at[i].set(region[0])
-            comment_end = comment_end.at[i].set(region[1])
+            if post_func == "eval":
+                region = (sequence.rfind("#") + 2, len(sequence))
+                comment_start = comment_start.at[eval_count].set(region[0])
+                comment_end = comment_end.at[eval_count].set(region[1])
+                eval_count += 1
             current_len += len(stmnt) + 1
+
         while current_len < total_len - self.min_padding:
             stmnt = self.generate_assignment()
             sequence += stmnt + "\n"

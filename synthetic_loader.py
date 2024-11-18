@@ -180,7 +180,6 @@ class SyntheticGenerator:
                 var, value = random.choice(choices)
 
             if func_name in void_functions:
-                # TODO: exclude print statements from loss
                 if type(value) == str:
                     value = f"'{value}'"
                 return f"{func_name}({var}) # {value}", None
@@ -188,6 +187,8 @@ class SyntheticGenerator:
             new_var = self.generate_random_variable()
             self.variables[new_var] = generate_functions[func_name](value)
             return f"{new_var}={func_name}({var})", new_var
+
+        loss_mask = jnp.ones((total_len), dtype=jnp.bool_)
 
         for i in range(3):
             generate_func()
@@ -233,12 +234,15 @@ class SyntheticGenerator:
             stmnt, var = call_func(func)
             if post_func:
                 stmnt += "\n" + call_func(post_func, var)[0]
-            sequence += stmnt + "\n"
-            if post_func == "eval":
-                region = (sequence.rfind("#") + 2, len(sequence))
-                comment_start = comment_start.at[eval_count].set(region[0])
-                comment_end = comment_end.at[eval_count].set(region[1])
+                region = (sequence.rfind("#") + 2, len(sequence) + 1)
+                if post_func == "eval":
+                    comment_start = comment_start.at[eval_count].set(region[0])
+                    comment_end = comment_end.at[eval_count].set(region[1])
+                else:
+                    loss_mask = loss_mask.at[region[0] : region[1]].set(0)
                 eval_count += 1
+
+            sequence += stmnt + "\n"
             current_len += len(stmnt) + 1
 
         while current_len < total_len - self.min_padding:
@@ -252,7 +256,7 @@ class SyntheticGenerator:
         assert (
             comment_start[-1] != comment_end[-1]
         ), f"Not all comment positions were set properly. \n{comment_start=}\n{comment_end=}"
-        return sequence, comment_start, comment_end
+        return sequence, comment_start, comment_end, loss_mask
 
     def reset_state(self):
         """Reset stateful attributes to ensure independence between batches."""
@@ -271,8 +275,9 @@ class SyntheticGenerator:
         sequences = []
         starts = []
         ends = []
+        loss_masks = []
         for _ in range(self.batch_size):
-            sequence, comment_start, comment_end = self.get_next_sequence()
+            sequence, comment_start, comment_end, loss_mask = self.get_next_sequence()
             encoded_sequence = jnp.pad(
                 self.tokenizer.encode(sequence),
                 (0, self.seq_length - len(sequence)),
@@ -281,9 +286,15 @@ class SyntheticGenerator:
             sequences.append(encoded_sequence)
             starts.append(comment_start)
             ends.append(comment_end)
+            loss_masks.append(loss_mask)
             self.reset_state()
 
-        return jnp.stack(sequences), jnp.stack(starts), jnp.stack(ends)
+        return (
+            jnp.stack(sequences),
+            jnp.stack(starts),
+            jnp.stack(ends),
+            jnp.stack(loss_masks),
+        )
 
     def __iter__(self):
         return self

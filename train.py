@@ -204,14 +204,16 @@ def get_parameterization(style: str, fully_aligned: bool = True):
 
     return Parameterization(**params)
 
+
 @pytree_dataclass
 class SyntheticMetrics:
     avg_confidence: f32[b""]
     avg_char_confidence: f32[b""]
     max_char_confidence: f32[b""]
-    min_char_confidence : f32[b""]
+    min_char_confidence: f32[b""]
     avg_start_char_confidence: f32[b""]
     avg_final_char_confidence: f32[b""]
+
 
 @pytree_dataclass
 class Model:
@@ -490,6 +492,7 @@ class Model:
         logprobs_at_targets = shardops.psum_scatter(
             "batch/d len -> batch/d len/t", logprobs_at_targets
         )
+        logprobs_at_targets = jnp.where(batch.loss_masks, logprobs_at_targets, 0)
         tokens_in_global_batch = logprobs_at_targets.size * jax.lax.psum(1, ("d", "t"))
 
         probs_at_targets = jnp.exp(logprobs_at_targets)
@@ -500,13 +503,14 @@ class Model:
 
         batch_indices = jnp.arange(batch_size)[:, jnp.newaxis]  # (batch, 1)
         start_char_probs = probs_at_targets[batch_indices, comment_starts]
-        avg_start_char_probs:f32[b""] = jnp.mean(start_char_probs)
-        last_char_probs = probs_at_targets[batch_indices, comment_ends-1]
-        avg_last_char_probs:f32[b""] = jnp.mean(last_char_probs)
+        avg_start_char_probs: f32[b""] = jnp.mean(start_char_probs)
+        last_char_probs = probs_at_targets[batch_indices, comment_ends - 1]
+        avg_last_char_probs: f32[b""] = jnp.mean(last_char_probs)
 
         comment_mask = jax.vmap(
             lambda starts_row, ends_row: jax.vmap(
-                lambda start, end: (jnp.arange(length) >= start) & (jnp.arange(length) < end)
+                lambda start, end: (jnp.arange(length) >= start)
+                & (jnp.arange(length) < end)
             )(starts_row, ends_row)
         )(comment_starts, comment_ends)
 
@@ -515,7 +519,7 @@ class Model:
         p_answer = jnp.prod(jnp.where(comment_mask, probs_at_targets, 1), axis=-1)
 
         # average confidence for each prints in sequence
-        avg_p_answer:f32[b""] = jnp.mean(p_answer)
+        avg_p_answer: f32[b""] = jnp.mean(p_answer)
 
         total_tokens = jnp.sum(comment_ends - comment_starts + 1)
         comment_probs = jnp.where(comment_mask, probs_at_targets, 0)
@@ -526,13 +530,16 @@ class Model:
         synth_metrics = SyntheticMetrics(
             avg_confidence=avg_p_answer,
             max_char_confidence=max_char_confidence,
-            min_char_confidence=min_char_confidence, 
+            min_char_confidence=min_char_confidence,
             avg_char_confidence=average_char_confidence,
             avg_start_char_confidence=avg_start_char_probs,
-            avg_final_char_confidence=avg_last_char_probs 
+            avg_final_char_confidence=avg_last_char_probs,
         )
-        
-        return ( -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch), synth_metrics )
+
+        return (
+            -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch),
+            synth_metrics,
+        )
 
 
 @pytree_dataclass
@@ -626,9 +633,9 @@ def training_step(
     def sharded_step(
         state: State, step: u32[b""], batch: TokenBatch
     ) -> Tuple[State, Metrics, SyntheticMetrics]:
-        ( loss, synth_metrics ), grad = jax.value_and_grad(lambda weights: weights.loss(h, batch), has_aux=True)(
-            state.weights
-        )
+        (loss, synth_metrics), grad = jax.value_and_grad(
+            lambda weights: weights.loss(h, batch), has_aux=True
+        )(state.weights)
         # Gradients have already been reduced across chips because the gradient of the weight `all_gather`
         # is weight-gradient `psum_scatter`. Loss, on the other hand, hasn't been reduced across chips: if we
         # did that inside the autodiff, we'd be double-reducing the loss, effectively multiplying it by the
@@ -859,7 +866,9 @@ def main_contained(config, logger):
                 training_io.start_profile()
                 profile_start = time.time()
 
-            state, output, synth_metrics = c_training_step(state, jnp.uint32(step), loader.load(step))
+            state, output, synth_metrics = c_training_step(
+                state, jnp.uint32(step), loader.load(step)
+            )
 
             # Run profile for two steps, to include data loading time in between them.
             if training_io.is_device_0() and step == start_step + 2:

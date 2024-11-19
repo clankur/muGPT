@@ -184,7 +184,7 @@ class SyntheticGenerator:
             self.variables[new_var] = generate_functions[func_name](value)
             return f"{new_var}={func_name}({var})", new_var
 
-        loss_mask = jnp.ones((total_len), dtype=jnp.bool_)
+        loss_mask = jnp.ones((self.seq_length), dtype=jnp.bool)
 
         for i in range(3):
             generate_func()
@@ -298,7 +298,7 @@ class SyntheticGenerator:
             jnp.stack(sequences),
             jnp.stack(starts),
             jnp.stack(ends),
-            jnp.stack(loss_masks),
+            jnp.stack(loss_masks, dtype=jnp.bool),
         )
 
     def __iter__(self):

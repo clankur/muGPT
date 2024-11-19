@@ -65,16 +65,22 @@ class SyntheticGenerator:
         self.void_func_freq = 0.001
         self.func_freq = 0.025
         self.pattern_cap = 5
+        self.n_generate_funcs = 2
         random.seed(seed)
 
     def generate_random_variable(self):
         """Generate a random lowercase variable name, randomly use last 3 entries as a prefix"""
         return self.trie.generate_random_variable()
 
-    def generate_random_value(self, v_type) -> int | str:
-        if v_type == "int" or not v_type and random.random() < 0.5:
+    def generate_random_value(self, v_type) -> int | str | tuple:
+        if not v_type:
+            v_type = random.choice(["int", "str", "tuple"])
+        if v_type == "tuple":
+            tuple_size = random.randint(2, 4)
+            return tuple(random.randint(1, 999) for _ in range(tuple_size))
+        elif v_type == "int":
             return random.randint(1, 999)
-        else:
+        else:  # str
             length = random.randint(1, 3)
             letters = string.ascii_lowercase
             return "".join(random.choice(letters) for _ in range(length))
@@ -105,6 +111,7 @@ class SyntheticGenerator:
         generate_functions = {
             "print": lambda s: s,
             "eval": lambda s: s,
+            "choice": lambda s: random.choice(s),
             # "rep": lambda s: s * 2,
         }
         void_functions = ["print", "eval"]
@@ -159,19 +166,32 @@ class SyntheticGenerator:
             if var:
                 value = self.variables[var]
             else:
-                choices = [
-                    (key, value)
-                    for (key, value) in self.variables.items()
-                    if isinstance(value, str) and len(value) < self.pattern_cap
-                ]
+                if func_name == "choice":
+                    filter_cond = lambda x: isinstance(x, tuple)
+                    choices = [
+                        (key, value)
+                        for (key, value) in self.variables.items()
+                        if filter_cond(value)
+                    ]
+                    v_type = "tuple"
+                else:
+                    filter_cond = (
+                        lambda x: isinstance(x, str) and len(x) < self.pattern_cap
+                    )
+                    choices = [
+                        (key, value)
+                        for (key, value) in self.variables.items()
+                        if filter_cond(value)
+                    ]
+                    v_type = "str"
                 if len(choices) < 2:
-                    stmnt = self.generate_assignment("str") + "\n"
+                    stmnt = self.generate_assignment(v_type) + "\n"
                     current_len += len(stmnt)
                     sequence += stmnt
                     choices = [
                         (key, value)
                         for (key, value) in self.variables.items()
-                        if isinstance(value, str)
+                        if filter_cond(value)
                     ]
                 var, value = random.choice(choices)
 
@@ -186,8 +206,9 @@ class SyntheticGenerator:
 
         loss_mask = jnp.ones((self.seq_length), dtype=jnp.bool)
 
-        for i in range(3):
+        for _ in range(self.n_generate_funcs):
             generate_func()
+
         n_non_void_funcs = len(
             [k for k in generate_functions.keys() if k not in void_functions]
         )
@@ -256,8 +277,9 @@ class SyntheticGenerator:
             current_len += len(stmnt) + 1
 
         if len(sequence) > self.seq_length:
-            print(f" Truncating {[ sequence[self.seq_length :] ]}")
-            sequence = sequence[: sequence[: self.seq_length].rfind("\n") + 1]
+            truncate_idx = sequence[self.seq_length :].rfind("\n") + 1
+            print(f" Truncating {[ sequence[truncate_idx:] ]}")
+            sequence = sequence[:truncate_idx]
         assert (
             comment_start[-1] != comment_end[-1]
         ), f"Not all comment positions were set properly. \n{comment_start=}\n{comment_end=}"

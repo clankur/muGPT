@@ -39,7 +39,7 @@ def test_variable_trie():
     assert all(var.islower() for var in variables), "Variables should be lowercase"
 
 
-@pytest.mark.parametrize("seq_length,batch_size", [(128, 1), (512, 2), (1024, 4)])
+@pytest.mark.parametrize("seq_length,batch_size", [(512, 1), (512, 2), (1024, 4)])
 def test_synthetic_generator_shapes(seq_length, batch_size):
     generator = SyntheticGenerator(
         seed=42, seq_length=seq_length, batch_size=batch_size
@@ -55,3 +55,8 @@ def test_synthetic_generator_shapes(seq_length, batch_size):
     assert starts.shape == (batch_size, n_eval_calls)
     assert ends.shape == (batch_size, n_eval_calls)
     assert loss_masks.shape == (batch_size, seq_length)
+    assert jnp.any(
+        starts[-1] != ends[-1]
+    ), "Not all comment positions were set properly."
+
+    assert jnp.all(starts < generator.seq_length), "Starts are out of bounds."

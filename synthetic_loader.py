@@ -62,7 +62,7 @@ class SyntheticGenerator:
         self.min_padding = int(seq_length * 0.25)
         self.tokenizer = SyntheticTokenizer()
         self.batch_size = batch_size
-        self.void_func_freq = 0.005
+        self.void_func_freq = 0.001
         self.func_freq = 0.025
         self.pattern_cap = 5
         random.seed(seed)
@@ -101,15 +101,11 @@ class SyntheticGenerator:
     def get_next_sequence(self):
         sequence = ""
         total_len = self.seq_length - self.min_padding
-        n_gen_calls = int(self.func_freq * total_len)
         n_void_calls = int(self.void_func_freq * total_len)
-        n_eval_calls = int(n_void_calls / 3.0) + int(n_gen_calls / 3.0)
-        comment_start = jnp.zeros((n_eval_calls), dtype=jnp.uint32)
-        comment_end = jnp.zeros((n_eval_calls), dtype=jnp.uint32)
         generate_functions = {
             "print": lambda s: s,
             "eval": lambda s: s,
-            "rep": lambda s: s * 2,
+            # "rep": lambda s: s * 2,
         }
         void_functions = ["print", "eval"]
         current_len = len(sequence)
@@ -192,11 +188,17 @@ class SyntheticGenerator:
 
         for i in range(3):
             generate_func()
+        n_non_void_funcs = len(
+            [k for k in generate_functions.keys() if k not in void_functions]
+        )
+        n_eval_calls = int(n_non_void_funcs + math.log2(total_len) // n_non_void_funcs)
+        comment_start = jnp.zeros((n_eval_calls), dtype=jnp.uint32)
+        comment_end = jnp.zeros((n_eval_calls), dtype=jnp.uint32)
 
         func_calls_print = [
             (func, "print")
             for func in generate_functions.keys()
-            for _ in range(max(3, int(math.log2(total_len) / len(generate_functions))))
+            for _ in range(max(2, int(math.log2(total_len) / len(generate_functions))))
             if func not in void_functions
         ]
         random.shuffle(func_calls_print)
@@ -234,13 +236,16 @@ class SyntheticGenerator:
             stmnt, var = call_func(func)
             if post_func:
                 stmnt += "\n" + call_func(post_func, var)[0]
-                region = (sequence.rfind("#") + 2, len(sequence) + 1)
+                region = (
+                    current_len + stmnt.rfind("#") + 2,
+                    current_len + len(stmnt) + 1,
+                )
                 if post_func == "eval":
                     comment_start = comment_start.at[eval_count].set(region[0])
                     comment_end = comment_end.at[eval_count].set(region[1])
+                    eval_count += 1
                 else:
                     loss_mask = loss_mask.at[region[0] : region[1]].set(0)
-                eval_count += 1
 
             sequence += stmnt + "\n"
             current_len += len(stmnt) + 1
@@ -251,8 +256,8 @@ class SyntheticGenerator:
             current_len += len(stmnt) + 1
 
         if len(sequence) > self.seq_length:
+            print(f" Truncating {[ sequence[self.seq_length :] ]}")
             sequence = sequence[: sequence[: self.seq_length].rfind("\n") + 1]
-
         assert (
             comment_start[-1] != comment_end[-1]
         ), f"Not all comment positions were set properly. \n{comment_start=}\n{comment_end=}"

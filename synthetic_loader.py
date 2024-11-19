@@ -318,8 +318,8 @@ class SyntheticGenerator:
 
         return (
             jnp.stack(sequences),
-            jnp.stack(starts),
-            jnp.stack(ends),
+            jnp.stack(starts, dtype=jnp.uint32),
+            jnp.stack(ends, dtype=jnp.uint32),
             jnp.stack(loss_masks, dtype=jnp.bool),
         )
 

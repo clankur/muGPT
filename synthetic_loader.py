@@ -278,7 +278,6 @@ class SyntheticGenerator:
 
         if len(sequence) > self.seq_length:
             truncate_idx = sequence[: self.seq_length].rfind("\n") + 1
-            print(f" Truncating {[ sequence[truncate_idx:] ]}")
             sequence = sequence[:truncate_idx]
         assert (
             comment_start[-1] != comment_end[-1]

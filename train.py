@@ -1,5 +1,6 @@
 """Main training loop, including the model, loss function, and optimizer."""
 
+import dataclasses
 from jax.tree_util import tree_leaves
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
@@ -620,6 +621,7 @@ class State:
 
 
 @partial(jax.jit, static_argnums=(2, 3), donate_argnums=(0,))
+@shardtypes.scope
 def training_step(
     state: State,
     step: u32[b""],
@@ -865,6 +867,28 @@ def main_contained(config, logger):
                 jax.block_until_ready(state)
                 training_io.start_profile()
                 profile_start = time.time()
+
+            # if half way point, double seq length and halve batch size
+            if step == config.training.steps // 2:
+                print("updating seq length and batch size")
+                tokens = dataclasses.replace(
+                    config.training.tokens,
+                    len=config.training.tokens.len * 2,
+                    batch=config.training.tokens.batch // 2,
+                )
+                config = dataclasses.replace(
+                    config, training=dataclasses.replace(config.training, tokens=tokens)
+                )
+                loader = get_loader(
+                    "train", config.training_data, config.training.tokens
+                )
+                c_training_step = training_step.lower(
+                    state,
+                    jnp.uint32(0),
+                    config.model,
+                    config.training,
+                    loader.load(step),
+                ).compile()
 
             state, output, synth_metrics = c_training_step(
                 state, jnp.uint32(step), loader.load(step)

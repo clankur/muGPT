@@ -485,6 +485,23 @@ class Model:
         return -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch)
 
 
+class Cope:
+    pos_emb: f32["max_len d_head"]
+    n_max: int
+
+    @staticmethod
+    def create(max_len: int, hparams: Hparams) -> "Cope":
+        pos_emb = jnp.zeros((max_len, hparams.d_head), dtype=jnp.float32)
+        n_max = max_len
+        return Cope(pos_emb=pos_emb, n_max=n_max)
+
+    def apply(
+        self, query: f32["B/d L Q K/t D"], att_logits: f32["B/d Qlen Q K/t D"]
+    ) -> f32["B/d L Q K/t D"]:
+        # apply sigmoid to att_logits
+        gates = jax.nn.sigmoid(att_logits)
+
+
 @pytree_dataclass
 class RopeTable:
     sin: f32["len d_head2"]

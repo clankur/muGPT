@@ -211,7 +211,6 @@ class SyntheticMetrics:
     avg_confidence: f32[b""]
     avg_char_confidence: f32[b""]
     max_char_confidence: f32[b""]
-    min_char_confidence: f32[b""]
     avg_start_char_confidence: f32[b""]
     avg_final_char_confidence: f32[b""]
 
@@ -526,12 +525,10 @@ class Model:
         comment_probs = jnp.where(comment_mask, probs_at_targets, 0)
         average_char_confidence = jnp.sum(comment_probs) / total_tokens
         max_char_confidence = jnp.max(comment_probs)
-        min_char_confidence = jnp.min(jnp.where(comment_mask, probs_at_targets, 1))
 
         synth_metrics = SyntheticMetrics(
             avg_confidence=avg_p_answer,
             max_char_confidence=max_char_confidence,
-            min_char_confidence=min_char_confidence,
             avg_char_confidence=average_char_confidence,
             avg_start_char_confidence=avg_start_char_probs,
             avg_final_char_confidence=avg_last_char_probs,

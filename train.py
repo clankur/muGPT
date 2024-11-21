@@ -68,6 +68,7 @@ class Hparams:
     vocab: int
     d_ff: int
     rope_max_timescale: int
+    cope_n_pos_max: int
 
     base: BaseWidths
     # parameters for mup
@@ -343,6 +344,7 @@ class Model:
         causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
 
         rope_table = RopeTable.create(L, h)
+        cope = Cope.create(h)
 
         # Transformer blocks.
         @explicit_activation_checkpointing
@@ -386,6 +388,7 @@ class Model:
                 preferred_element_type=jnp.float32,
             )
             logits = jnp.where(causal_mask, logits, -1e10)
+            logits += cope.apply(q, logits)
             probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
             attn_out = shardops.einsum_unreduced(
                 "B/d Qlen Klen Q K/t, B/d Klen K/t D -> B/d Qlen Q K/t D", probs, v
@@ -485,21 +488,47 @@ class Model:
         return -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch)
 
 
+@pytree_dataclass
 class Cope:
     pos_emb: f32["max_len d_head"]
     n_max: int
 
     @staticmethod
-    def create(max_len: int, hparams: Hparams) -> "Cope":
-        pos_emb = jnp.zeros((max_len, hparams.d_head), dtype=jnp.float32)
-        n_max = max_len
+    def create(hparams: Hparams) -> "Cope":
+        n_max = hparams.cope_n_pos_max
+        pos_emb = jnp.zeros((n_max, hparams.d_head), dtype=jnp.float32)
         return Cope(pos_emb=pos_emb, n_max=n_max)
 
     def apply(
-        self, query: f32["B/d L Q K/t D"], att_logits: f32["B/d Qlen Q K/t D"]
-    ) -> f32["B/d L Q K/t D"]:
+        self, query: f32["B/d Qlen Q K/t D"], att_logits: f32["B/d Qlen Klen Q K/t"]
+    ) -> f32["B/d Qlen Klen Q K/t"]:
         # apply sigmoid to att_logits
         gates = jax.nn.sigmoid(att_logits)
+
+        positions = jnp.flip(jnp.cumsum(jnp.flip(gates, axis=-1), axis=-1), axis=-1)
+        positions = jnp.clip(positions, a_max=self.n_max - 1)
+
+        pos_floor = jnp.floor(positions).astype(jnp.int32)
+        pos_ceil = jnp.ceil(positions).astype(jnp.int32)
+
+        z_p = shardops.einsum_unreduced(
+            "B/d Qlen Q K/t D, n_max D -> B/d Qlen Q K/t n_max", query, self.pos_emb
+        )
+
+        z_p_ceil = shardops.index_unreduced(
+            "B/d Qlen Q K/t [n_max], B/d Qlen Klen Q K/t -> B/d Qlen Klen Q K/t ",
+            z_p,
+            pos_ceil,
+        )
+        z_p_floor = shardops.index_unreduced(
+            "B/d Qlen Q K/t [n_max], B/d Qlen Klen Q K/t -> B/d Qlen Klen Q K/t ",
+            z_p,
+            pos_floor,
+        )
+
+        # Interpolation factor
+        w = positions - pos_floor
+        return w * z_p_ceil + (1 - w) * z_p_floor
 
 
 @pytree_dataclass

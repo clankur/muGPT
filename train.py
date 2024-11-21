@@ -69,6 +69,8 @@ class Hparams:
     d_ff: int
     rope_max_timescale: int
     cope_n_pos_max: int
+    apply_cope: bool
+    apply_rope: bool
 
     base: BaseWidths
     # parameters for mup
@@ -367,14 +369,16 @@ class Model:
                     "B/d L M, M Q K/t D -> B/d L Q K/t D", nx, w_q
                 )
             )
-            q = rope_table.apply("L D -> 1 L 1 1 D", q)
+            if h.apply_rope:
+                q = rope_table.apply("L D -> 1 L 1 1 D", q)
             w_kv = shardops.all_gather("2 M/d K/t D -> 2 M K/t D", jnp.bfloat16(w_kv))
             k, v = hidden_mult * shardops.einsum_unreduced(
                 "B/d L M, k_v M K/t D -> k_v B/d L K/t D", nx, w_kv
             )
             k = save_for_backward(k)
             v = save_for_backward(v)
-            k = rope_table.apply("L d -> 1 L 1 d", k)
+            if h.apply_rope:
+                k = rope_table.apply("L d -> 1 L 1 d", k)
 
             logit_scale = jax.lax.select(
                 h.parameterization.lower() == "mup",
@@ -388,7 +392,8 @@ class Model:
                 preferred_element_type=jnp.float32,
             )
             logits = jnp.where(causal_mask, logits, -1e10)
-            logits += cope.apply(q, logits)
+            if h.apply_cope:
+                logits += cope.apply(q, logits)
             probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
             attn_out = shardops.einsum_unreduced(
                 "B/d Qlen Klen Q K/t, B/d Klen K/t D -> B/d Qlen Q K/t D", probs, v
@@ -500,10 +505,9 @@ class Cope:
         return Cope(pos_emb=pos_emb, n_max=n_max)
 
     def apply(
-        self, query: f32["B/d Qlen Q K/t D"], att_logits: f32["B/d Qlen Klen Q K/t"]
+        self, query: f32["B/d Qlen Q K/t D"], logits: f32["B/d Qlen Klen Q K/t"]
     ) -> f32["B/d Qlen Klen Q K/t"]:
-        # apply sigmoid to att_logits
-        gates = jax.nn.sigmoid(att_logits)
+        gates = jax.nn.sigmoid(logits)
 
         positions = jnp.flip(jnp.cumsum(jnp.flip(gates, axis=-1), axis=-1), axis=-1)
         positions = jnp.clip(positions, a_max=self.n_max - 1)

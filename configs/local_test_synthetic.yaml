@@ -23,6 +23,12 @@ model:
   vocab: 32768 
   d_ff: 1024
   rope_max_timescale: 256
+
+  # parameters for mixattention
+  window_size: 128
+  ma_pair: true
+  block_starts: (0, 12)
+
   a_attn: 1
   a_output: 1
   zero_queries: true

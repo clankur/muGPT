@@ -25,7 +25,7 @@ import jax
 from dataclasses import dataclass
 from typeguard import typechecked
 import hydra
-from typing import Any, Optional, Tuple, Union
+from typing import Any, Optional, Tuple, Union, List
 from functools import cached_property, partial
 from collections import defaultdict
 import datetime
@@ -68,6 +68,11 @@ class Hparams:
     vocab: int
     d_ff: int
     rope_max_timescale: int
+
+    # parameters for mixattention
+    window_size: int
+    block_starts: tuple[int]
+    ma_pair: bool
 
     base: BaseWidths
     # parameters for mup
@@ -340,16 +345,28 @@ class Model:
         causal_mask: bool_[b"1 L L 1 1"] = jnp.tril(
             jnp.ones((L, L), dtype=jnp.bool_), 0
         )[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
-        causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
+        local_mask: bool_[b"1 L L 1 1"] = jnp.triu(
+            jnp.ones((L, L), dtype=jnp.bool_), 1 - h.window_size
+        )[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
 
+        causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
         rope_table = RopeTable.create(L, h)
 
         # Transformer blocks.
         @explicit_activation_checkpointing
         @typechecked
         def loop_body(
-            x: bf16[b"B/d L M/t"], layer_weights: Any
-        ) -> Tuple[bf16[b"B/d L M/t"], Tuple[()]]:
+            carry: Tuple[bf16[b"B/d L M/t"], int], layer_weights: Any
+        ) -> Tuple[Tuple[bf16[b"B/d L M/t"], int], Tuple[()]]:
+
+            x, layer_idx = carry
+            if layer_idx in h.block_starts:
+                use_local_window_attn = False
+            elif h.ma_pair and layer_idx - 1 in h.block_starts:
+                use_local_window_attn = False
+            else:
+                use_local_window_attn = True
+
             w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2 = layer_weights
 
             # Pre-attention RMSNorm
@@ -384,6 +401,12 @@ class Model:
                 q,
                 k,
                 preferred_element_type=jnp.float32,
+            )
+
+            attn_mask: bool_[b"B/d L L 1 1"] = jax.lax.select(
+                use_local_window_attn,
+                jnp.logical_and(causal_mask, local_mask),
+                causal_mask,
             )
             logits = jnp.where(causal_mask, logits, -1e10)
             probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
@@ -422,11 +445,11 @@ class Model:
             )
             ffn_out = shardops.psum_scatter("B/d L M -> B/d L M/t", ffn_out)
 
-            return jnp.bfloat16(x + ffn_out), ()
+            return (jnp.bfloat16(x + ffn_out), layer_idx + 1), ()
 
-        x, () = jax.lax.scan(
+        (x, _), () = jax.lax.scan(
             loop_body,
-            jnp.bfloat16(x),
+            (jnp.bfloat16(x), 0),
             (
                 self.w_q,
                 self.w_kv,

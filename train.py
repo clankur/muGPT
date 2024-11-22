@@ -355,9 +355,7 @@ class Model:
         # Transformer blocks.
         @explicit_activation_checkpointing
         @typechecked
-        def loop_body(
-            carry: Tuple[bf16[b"B/d L M/t"], int], layer_weights: Any
-        ) -> Tuple[Tuple[bf16[b"B/d L M/t"], int], Tuple[()]]:
+        def loop_body(carry: Any, layer_weights: Any) -> Tuple[Any, Tuple[()]]:
 
             x, layer_idx = carry
             if layer_idx in h.block_starts:

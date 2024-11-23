@@ -58,6 +58,8 @@ class SyntheticGenerator:
         self.variables = {}
         self.funcs = {}
         self.trie = VariableTrie()
+        assert seq_length >= 256, "Sequence length must be at least 512"
+
         self.seq_length = seq_length
         self.min_padding = int(seq_length * 0.25)
         self.tokenizer = SyntheticTokenizer()

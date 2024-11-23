@@ -603,6 +603,7 @@ class TrainingHparams:
     use_grad_clip: bool = True
     use_gpu: bool = False
 
+
 @pytree_dataclass
 class State:
     weights: Model
@@ -974,7 +975,7 @@ def main(config):
             project_name=f"{config_name}/{git_branch_name}", task_name=task_name
         )
 
-        if config.model.use_gpu:
+        if config.training.use_gpu:
             task.set_packages("requirements-gpu.txt")
         else:
             task.set_packages("requirements-tpu.txt")

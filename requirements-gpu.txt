@@ -1,0 +1,13 @@
+zarr
+fsspec[gcs]
+jax[cuda12]
+einops
+hydra-core
+clearml
+clearml-agent
+typeguard==4.1.5
+transformers
+datasets
+torch[cpu]
+optuna
+virtualenv

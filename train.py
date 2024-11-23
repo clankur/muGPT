@@ -1,5 +1,6 @@
 """Main training loop, including the model, loss function, and optimizer."""
 
+import dataclasses
 from jax.tree_util import tree_leaves
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
@@ -13,6 +14,7 @@ from shardlib.shardtypes import bf16, bool_, f32, pytree_dataclass, u32, make_sh
 from input_loader import (
     FlatTokensParams,
     HuggingFaceDataParams,
+    SyntheticDataParams,
     TokenBatch,
     TokenBatchParams,
     get_loader,
@@ -202,6 +204,15 @@ def get_parameterization(style: str, fully_aligned: bool = True):
             )
 
     return Parameterization(**params)
+
+
+@pytree_dataclass
+class SyntheticMetrics:
+    avg_confidence: f32[b""]
+    avg_char_confidence: f32[b""]
+    max_char_confidence: f32[b""]
+    avg_start_char_confidence: f32[b""]
+    avg_final_char_confidence: f32[b""]
 
 
 @pytree_dataclass
@@ -456,7 +467,7 @@ class Model:
         return logits
 
     @typechecked
-    def loss(self, h: Hparams, batch: TokenBatch) -> f32[b""]:
+    def loss(self, h: Hparams, batch: TokenBatch) -> Tuple[f32[b""], SyntheticMetrics]:
         # Given sequence-packed targets:
         #   [[1, 2], [3, 4, 5], [6, 7, 8, 9]]
         # we want inputs:
@@ -481,8 +492,52 @@ class Model:
         logprobs_at_targets = shardops.psum_scatter(
             "batch/d len -> batch/d len/t", logprobs_at_targets
         )
+        logprobs_at_targets = jnp.where(batch.loss_masks, logprobs_at_targets, 0)
         tokens_in_global_batch = logprobs_at_targets.size * jax.lax.psum(1, ("d", "t"))
-        return -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch)
+
+        probs_at_targets = jnp.exp(logprobs_at_targets)
+
+        batch_size, length = probs_at_targets.shape
+        comment_starts: u32[b"batch/d n_print"] = batch.comment_starts
+        comment_ends: u32[b"batch/d n_print"] = batch.comment_ends
+
+        batch_indices = jnp.arange(batch_size)[:, jnp.newaxis]  # (batch, 1)
+        start_char_probs = probs_at_targets[batch_indices, comment_starts]
+        avg_start_char_probs: f32[b""] = jnp.mean(start_char_probs)
+        last_char_probs = probs_at_targets[batch_indices, comment_ends - 1]
+        avg_last_char_probs: f32[b""] = jnp.mean(last_char_probs)
+
+        comment_mask = jax.vmap(
+            lambda starts_row, ends_row: jax.vmap(
+                lambda start, end: (jnp.arange(length) >= start)
+                & (jnp.arange(length) < end)
+            )(starts_row, ends_row)
+        )(comment_starts, comment_ends)
+
+        probs_at_targets = probs_at_targets[:, jnp.newaxis, :]
+
+        p_answer = jnp.prod(jnp.where(comment_mask, probs_at_targets, 1), axis=-1)
+
+        # average confidence for each prints in sequence
+        avg_p_answer: f32[b""] = jnp.mean(p_answer)
+
+        total_tokens = jnp.sum(comment_ends - comment_starts + 1)
+        comment_probs = jnp.where(comment_mask, probs_at_targets, 0)
+        average_char_confidence = jnp.sum(comment_probs) / total_tokens
+        max_char_confidence = jnp.max(comment_probs)
+
+        synth_metrics = SyntheticMetrics(
+            avg_confidence=avg_p_answer,
+            max_char_confidence=max_char_confidence,
+            avg_char_confidence=average_char_confidence,
+            avg_start_char_confidence=avg_start_char_probs,
+            avg_final_char_confidence=avg_last_char_probs,
+        )
+
+        return (
+            -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch),
+            synth_metrics,
+        )
 
 
 @pytree_dataclass
@@ -546,6 +601,7 @@ class TrainingHparams:
     seed: int
     queue: Optional[str] = None
     use_grad_clip: bool = True
+    use_gpu: bool = False
 
 
 @pytree_dataclass
@@ -563,22 +619,23 @@ class State:
 
 
 @partial(jax.jit, static_argnums=(2, 3), donate_argnums=(0,))
+@shardtypes.scope
 def training_step(
     state: State,
     step: u32[b""],
     h: Hparams,
     hparams: TrainingHparams,
     batch: TokenBatch,
-) -> Tuple[Any, Metrics]:
+) -> Tuple[Any, Metrics, SyntheticMetrics]:
     @partial(
         shardtypes.typed_shard_map, check_rep=False
     )  # check_rep=False for https://github.com/google/jax/issues/20335
     def sharded_step(
         state: State, step: u32[b""], batch: TokenBatch
-    ) -> Tuple[State, Metrics]:
-        loss, grad = jax.value_and_grad(lambda weights: weights.loss(h, batch))(
-            state.weights
-        )
+    ) -> Tuple[State, Metrics, SyntheticMetrics]:
+        (loss, synth_metrics), grad = jax.value_and_grad(
+            lambda weights: weights.loss(h, batch), has_aux=True
+        )(state.weights)
         # Gradients have already been reduced across chips because the gradient of the weight `all_gather`
         # is weight-gradient `psum_scatter`. Loss, on the other hand, hasn't been reduced across chips: if we
         # did that inside the autodiff, we'd be double-reducing the loss, effectively multiplying it by the
@@ -695,7 +752,7 @@ def training_step(
             grad_norm=global_norm * rescale,
             raw_grad_norm=global_norm,
         )
-        return new_state, metrics
+        return new_state, metrics, synth_metrics
 
     return sharded_step(state, step, batch)
 
@@ -723,18 +780,25 @@ class Config:
     io: training_io.IOConfig
     flat_tokens: Optional[FlatTokensParams] = None
     hf_dataset: Optional[HuggingFaceDataParams] = None
+    synthetic_dataset: Optional[SyntheticDataParams] = None
 
     def __post_init__(self):
         assert (
-            self.flat_tokens is not None or self.hf_dataset is not None
-        ), "Must provide either flat_tokens or hf_dataset."
+            self.flat_tokens is not None
+            or self.hf_dataset is not None
+            or self.synthetic_dataset is not None
+        ), "Must provide either flat_tokens or hf_dataset or synthetic_dataset."
         assert not (
-            self.flat_tokens is not None and self.hf_dataset is not None
-        ), "Should not specify both flat_tokens and hf_dataset."
+            self.flat_tokens is not None
+            and self.hf_dataset is not None
+            and self.synthetic_dataset is not None
+        ), "Should not specify both flat_tokens and hf_dataset and synthetic_dataset."
 
     @cached_property
-    def training_data(self) -> Union[FlatTokensParams, HuggingFaceDataParams]:
-        return self.flat_tokens or self.hf_dataset
+    def training_data(
+        self,
+    ) -> Union[FlatTokensParams, HuggingFaceDataParams, SyntheticDataParams]:
+        return self.flat_tokens or self.hf_dataset or self.synthetic_dataset
 
 
 def main_contained(config, logger):
@@ -802,7 +866,31 @@ def main_contained(config, logger):
                 training_io.start_profile()
                 profile_start = time.time()
 
-            state, output = c_training_step(state, jnp.uint32(step), loader.load(step))
+            # if half way point, double seq length and halve batch size
+            if step == config.training.steps // 2:
+                print("updating seq length and batch size")
+                tokens = dataclasses.replace(
+                    config.training.tokens,
+                    len=config.training.tokens.len * 2,
+                    batch=config.training.tokens.batch // 2,
+                )
+                config = dataclasses.replace(
+                    config, training=dataclasses.replace(config.training, tokens=tokens)
+                )
+                loader = get_loader(
+                    "train", config.training_data, config.training.tokens
+                )
+                c_training_step = training_step.lower(
+                    state,
+                    jnp.uint32(0),
+                    config.model,
+                    config.training,
+                    loader.load(step),
+                ).compile()
+
+            state, output, synth_metrics = c_training_step(
+                state, jnp.uint32(step), loader.load(step)
+            )
 
             # Run profile for two steps, to include data loading time in between them.
             if training_io.is_device_0() and step == start_step + 2:
@@ -834,6 +922,7 @@ def main_contained(config, logger):
                     )
                 else:
                     cum_metrics = output
+                training_io.log(step, logger, synth_metrics)
                 training_io.log(step, logger, cum_metrics)
                 cum_metrics = output
             else:
@@ -885,7 +974,12 @@ def main(config):
         task = Task.init(
             project_name=f"{config_name}/{git_branch_name}", task_name=task_name
         )
-        task.set_packages("requirements-tpu.txt")
+
+        if config.training.use_gpu:
+            task.set_packages("requirements-gpu.txt")
+        else:
+            task.set_packages("requirements-tpu.txt")
+
         task.add_tags([git_branch_name])
         logger = task.get_logger()
         task.execute_remotely(queue_name=config.training.queue)

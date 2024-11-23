@@ -18,6 +18,7 @@ training:
     len: 128
     batch: 256
   use_grad_clip: true
+  use_gpu: true
 
 model:
   d_model: 128

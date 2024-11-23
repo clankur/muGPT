@@ -601,7 +601,7 @@ class TrainingHparams:
     seed: int
     queue: Optional[str] = None
     use_grad_clip: bool = True
-
+    use_gpu: bool = False
 
 @pytree_dataclass
 class State:
@@ -973,7 +973,12 @@ def main(config):
         task = Task.init(
             project_name=f"{config_name}/{git_branch_name}", task_name=task_name
         )
-        task.set_packages("requirements-gpu.txt")
+
+        if config.model.use_gpu:
+            task.set_packages("requirements-gpu.txt")
+        else:
+            task.set_packages("requirements-tpu.txt")
+
         task.add_tags([git_branch_name])
         logger = task.get_logger()
         task.execute_remotely(queue_name=config.training.queue)

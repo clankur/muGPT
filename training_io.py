@@ -27,7 +27,14 @@ PyTree = Any
 def is_device_0():
   return int(os.environ['RANK']) == 0 if 'RANK' in os.environ else jax.process_index() == 0
 
-  
+path_map = {
+  "avg_confidence": ("Avg Total Confidence", "Average total confidence" ),
+  "avg_char_confidence": ( "Character confidence", "Average char confidence" ),
+  "max_char_confidence": ( "Character confidence", "Max char confidence" ),
+  "min_char_confidence": ( "Character confidence", "Min char confidence" ),
+  "avg_start_char_confidence": ("Character confidence", "Start character confidence"),
+  "avg_final_char_confidence": ("Character confidence", "Final character confidence")
+}  
 
 @dataclass
 class IOConfig:
@@ -41,16 +48,25 @@ def log(step: int, logger: Logger, output: PyTree):
   """Logs the output of a training step. The output must be a PyTree of f32 arrays."""
 
   if is_device_0():
-    metrics = {}
     metrics_dict = {}
     for path, arr in jax.tree_util.tree_leaves_with_path(output):
       path = jax.tree_util.keystr(path)
+      if path not in path_map:
+        path_map[path] = ( path, path )
+      title, series = path_map[path]
       arr = jax.device_get(arr)
+
       if arr.shape == () and arr.dtype == jnp.float32:
         if logger:
           logger.report_scalar(
-            title=path, series=path, value=arr, iteration=step)
-        metrics_dict[path] = float(arr)
+            title=title, series=series, value=arr, iteration=step)
+        metrics_dict[series] = float(arr)
+      elif arr.ndim == 1 and arr.dtype == jnp.float32:
+        if logger:
+          for i, v in enumerate(arr):
+            logger.report_scalar(
+                title=path, series=f"batch_{i}_{path}", value=v, iteration=step)
+        metrics_dict[path] = arr.tolist()  
       elif arr.dtype == jnp.float32:
         if logger:
           logger.report_histogram(

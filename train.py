@@ -359,8 +359,11 @@ class Model:
         )[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
         causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
 
-        rope_table = RopeTable.create(L, h)
-        cope = Cope.create(h)
+        if h.apply_rope:
+            rope_table = RopeTable.create(L, h)
+
+        if h.apply_cope:
+            cope = Cope.create(h)
 
         # Transformer blocks.
         @explicit_activation_checkpointing

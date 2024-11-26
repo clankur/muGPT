@@ -71,8 +71,8 @@ class Hparams:
 
     # parameters for mixattention
     window_size: int
-    block_starts: tuple[int]
-    ma_pair: bool
+    shared_kv_idx: tuple[int]
+    sa_layers: tuple[int]
 
     base: BaseWidths
     # parameters for mup
@@ -352,18 +352,22 @@ class Model:
         causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
         rope_table = RopeTable.create(L, h)
 
+        cache_idx = 0
+        assert len(h.shared_kv_idx) == h.layers
+        kv_cache = jnp.zeros((2, ids.shape[0], h.n_kv, max(h.shared_kv_idx), h.d_head))
+
         # Transformer blocks.
         @explicit_activation_checkpointing
         @typechecked
         def loop_body(carry: Any, layer_weights: Any) -> Tuple[Any, Tuple[()]]:
 
             x, layer_idx = carry
-            if layer_idx in h.block_starts:
+
+            use_local_window_attn = True
+            if layer_idx in h.sa_layers:
                 use_local_window_attn = False
-            elif h.ma_pair and layer_idx - 1 in h.block_starts:
-                use_local_window_attn = False
-            else:
-                use_local_window_attn = True
+
+            cache_idx = h.shared_kv_idx[layer_idx]
 
             w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2 = layer_weights
 
@@ -382,9 +386,18 @@ class Model:
             )
             q = rope_table.apply("L D -> 1 L 1 1 D", q)
             w_kv = shardops.all_gather("2 M/d K/t D -> 2 M K/t D", jnp.bfloat16(w_kv))
-            k, v = hidden_mult * shardops.einsum_unreduced(
-                "B/d L M, k_v M K/t D -> k_v B/d L K/t D", nx, w_kv
-            )
+            if layer_idx == cache_idx[1]:
+                k, v = hidden_mult * shardops.einsum_unreduced(
+                    "B/d L M, k_v M K/t D -> k_v B/d L K/t D", nx, w_kv
+                )
+                kv_cache = (
+                    kv_cache[:, :, cache_idx[1], :]
+                    .at[:, :, :, :]
+                    .set(jnp.stack([k, v], axis=0))
+                )
+            else:
+                k, v = kv_cache[:, :, cache_idx[1], :]
+
             k = save_for_backward(k)
             v = save_for_backward(v)
             k = rope_table.apply("L d -> 1 L 1 d", k)
@@ -406,7 +419,7 @@ class Model:
                 jnp.logical_and(causal_mask, local_mask),
                 causal_mask,
             )
-            logits = jnp.where(causal_mask, logits, -1e10)
+            logits = jnp.where(attn_mask, logits, -1e10)
             probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
             attn_out = shardops.einsum_unreduced(
                 "B/d Qlen Klen Q K/t, B/d Klen K/t D -> B/d Qlen Q K/t D", probs, v

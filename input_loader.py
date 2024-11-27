@@ -422,7 +422,7 @@ class HuggingFaceDataLoader:
         try:
             batch, is_start = next(self.iterator)
         except StopIteration:
-            self.dataset = self.dataset.shuffle(seed=self.seed + step)
+            self.dataset = self.dataset.shuffle(seed=self.config.seed + step)
             tokenized = self.dataset.select_columns(["text"]).map(
                 self.tokenizer, input_columns=["text"], remove_columns=["text"]
             )

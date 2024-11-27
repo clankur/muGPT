@@ -318,9 +318,16 @@ def pytree_dataclass(cls):
 
 def make_partition_specs(cls):
     """Instantiates a pytree dataclass with a PartitionSpec at array type."""
-    # Check for a tuple type:
     origin = typing.get_origin(cls)
     args = typing.get_args(cls)
+    if origin is Union:
+        # Find the non-None type in the Union
+        array_type = next((arg for arg in args if arg is not type(None)), None)
+        if array_type is None:
+            raise ValueError(f"Union type {cls} must have at least one non-None type")
+        return make_partition_specs(array_type)
+
+    # Check for a tuple type:
     if origin is tuple:
         return tuple(make_partition_specs(arg) for arg in args)
     elif origin is not None and issubclass(origin, number):

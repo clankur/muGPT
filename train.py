@@ -66,17 +66,20 @@ class Hparams:
     n_q_per_kv: int
     n_kv: int
     d_head: int
-    layers: int
     vocab: int
     d_ff: int
+    layers: int
+    base: BaseWidths
+
+    # fields for position embeddings
     rope_max_timescale: int
 
-    base: BaseWidths
     # parameters for mup
     a_attn: float
     a_output: float
     zero_queries: bool
     zero_unembed: bool
+
     # parameters for exp scaling
     parameterization: str
     fully_aligned: bool

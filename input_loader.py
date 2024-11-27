@@ -59,9 +59,9 @@ class TokenBatch:
 
     targets: u32["batch/d len"]
     is_seq_start: bool_["batch/d len"]
-    comment_starts: u32["batch/d n_prints"]
-    comment_ends: u32["batch/d n_prints"]
-    loss_masks: bool_["batch/d len"]
+    comment_starts: Union[u32["batch/d n_prints"], None] = None
+    comment_ends: Union[u32["batch/d n_prints"], None] = None
+    loss_masks: Union[bool_["batch/d len"], None] = None
 
 
 @dataclass(frozen=True)
@@ -385,8 +385,10 @@ class HuggingFaceDataLoader:
             return_attention_mask=False,
             return_tensors="np",
         )
-        dataset = load_dataset(config.path, config.name, streaming=True, split=split)
-        dataset = dataset.shuffle(seed=config.seed)
+        self.dataset = load_dataset(
+            config.path, config.name, streaming=True, split=split
+        )
+        dataset = self.dataset.shuffle(seed=config.seed)
         tokenized = dataset.select_columns(["text"]).map(
             self.tokenize, input_columns=["text"], remove_columns=["text"]
         )

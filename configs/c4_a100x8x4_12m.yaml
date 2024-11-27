@@ -26,16 +26,27 @@ model:
   layers: 8
   d_ff: 512 
   vocab: 32768
+
   rope_max_timescale: 10000
-  a_attn: 1.
-  a_output: 1.
-  zero_queries: true
-  zero_unembed: true
+
   base:
     d_model: 128
     n_q_per_kv: 1
     n_kv: 16 
     d_head: 32 
     d_ff: 512 
+  
+  a_attn: 1.
+  a_output: 1.
+  zero_queries: true
+  zero_unembed: true
+
+  parameterization: "sp" 
+  fully_aligned: false
+  gamma_embed: 1. 
+  gamma_hidden: 1. 
+  gamma_unembed: 1. 
+
+
   
 checkpoint_interval: 9200

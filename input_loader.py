@@ -388,17 +388,17 @@ class HuggingFaceDataLoader:
         self.dataset = load_dataset(
             config.path, config.name, streaming=True, split=split
         )
-        self.seed = config.seed
-        dataset = self.dataset.shuffle(seed=self.seed)
+        self.config = config
+        dataset = self.dataset.shuffle(seed=self.config.seed)
         tokenized = dataset.select_columns(["text"]).map(
             tokenize, input_columns=["text"], remove_columns=["text"]
         )
         dataloader = DataLoader(
             tokenized,
-            num_workers=config.num_workers,
+            num_workers=self.config.num_workers,
             collate_fn=self.collate,
             drop_last=True,
-            batch_size=config.sequences_packed_per_batch,
+            batch_size=self.config.sequences_packed_per_batch,
         )
         self.iterator = iter(dataloader)
 

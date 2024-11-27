@@ -492,47 +492,58 @@ class Model:
         logprobs_at_targets = shardops.psum_scatter(
             "batch/d len -> batch/d len/t", logprobs_at_targets
         )
-        logprobs_at_targets = jnp.where(batch.loss_masks, logprobs_at_targets, 0)
+        if batch.loss_masks is not None:
+            logprobs_at_targets = jnp.where(batch.loss_masks, logprobs_at_targets, 0)
         tokens_in_global_batch = logprobs_at_targets.size * jax.lax.psum(1, ("d", "t"))
 
         probs_at_targets = jnp.exp(logprobs_at_targets)
 
         batch_size, length = probs_at_targets.shape
-        comment_starts: u32[b"batch/d n_print"] = batch.comment_starts
-        comment_ends: u32[b"batch/d n_print"] = batch.comment_ends
 
-        batch_indices = jnp.arange(batch_size)[:, jnp.newaxis]  # (batch, 1)
-        start_char_probs = probs_at_targets[batch_indices, comment_starts]
-        avg_start_char_probs: f32[b""] = jnp.mean(start_char_probs)
-        last_char_probs = probs_at_targets[batch_indices, comment_ends - 1]
-        avg_last_char_probs: f32[b""] = jnp.mean(last_char_probs)
+        if batch.comment_starts is not None and batch.comment_ends is not None:
+            comment_starts: u32[b"batch/d n_print"] = batch.comment_starts
+            comment_ends: u32[b"batch/d n_print"] = batch.comment_ends
 
-        comment_mask = jax.vmap(
-            lambda starts_row, ends_row: jax.vmap(
-                lambda start, end: (jnp.arange(length) >= start)
-                & (jnp.arange(length) < end)
-            )(starts_row, ends_row)
-        )(comment_starts, comment_ends)
+            batch_indices = jnp.arange(batch_size)[:, jnp.newaxis]  # (batch, 1)
+            start_char_probs = probs_at_targets[batch_indices, comment_starts]
+            avg_start_char_probs: f32[b""] = jnp.mean(start_char_probs)
+            last_char_probs = probs_at_targets[batch_indices, comment_ends - 1]
+            avg_last_char_probs: f32[b""] = jnp.mean(last_char_probs)
 
-        probs_at_targets = probs_at_targets[:, jnp.newaxis, :]
+            comment_mask = jax.vmap(
+                lambda starts_row, ends_row: jax.vmap(
+                    lambda start, end: (jnp.arange(length) >= start)
+                    & (jnp.arange(length) < end)
+                )(starts_row, ends_row)
+            )(comment_starts, comment_ends)
 
-        p_answer = jnp.prod(jnp.where(comment_mask, probs_at_targets, 1), axis=-1)
+            probs_at_targets = probs_at_targets[:, jnp.newaxis, :]
 
-        # average confidence for each prints in sequence
-        avg_p_answer: f32[b""] = jnp.mean(p_answer)
+            p_answer = jnp.prod(jnp.where(comment_mask, probs_at_targets, 1), axis=-1)
 
-        total_tokens = jnp.sum(comment_ends - comment_starts + 1)
-        comment_probs = jnp.where(comment_mask, probs_at_targets, 0)
-        average_char_confidence = jnp.sum(comment_probs) / total_tokens
-        max_char_confidence = jnp.max(comment_probs)
+            # average confidence for each prints in sequence
+            avg_p_answer: f32[b""] = jnp.mean(p_answer)
 
-        synth_metrics = SyntheticMetrics(
-            avg_confidence=avg_p_answer,
-            max_char_confidence=max_char_confidence,
-            avg_char_confidence=average_char_confidence,
-            avg_start_char_confidence=avg_start_char_probs,
-            avg_final_char_confidence=avg_last_char_probs,
-        )
+            total_tokens = jnp.sum(comment_ends - comment_starts + 1)
+            comment_probs = jnp.where(comment_mask, probs_at_targets, 0)
+            average_char_confidence = jnp.sum(comment_probs) / total_tokens
+            max_char_confidence = jnp.max(comment_probs)
+
+            synth_metrics = SyntheticMetrics(
+                avg_confidence=avg_p_answer,
+                max_char_confidence=max_char_confidence,
+                avg_char_confidence=average_char_confidence,
+                avg_start_char_confidence=avg_start_char_probs,
+                avg_final_char_confidence=avg_last_char_probs,
+            )
+        else:
+            synth_metrics = SyntheticMetrics(
+                avg_confidence=jnp.float32(0.0),
+                max_char_confidence=jnp.float32(0.0),
+                avg_char_confidence=jnp.float32(0.0),
+                avg_start_char_confidence=jnp.float32(0.0),
+                avg_final_char_confidence=jnp.float32(0.0),
+            )
 
         return (
             -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch),
@@ -888,8 +899,9 @@ def main_contained(config, logger):
                     loader.load(step),
                 ).compile()
 
+            batch = loader.load(step)
             state, output, synth_metrics = c_training_step(
-                state, jnp.uint32(step), loader.load(step)
+                state, jnp.uint32(step), batch
             )
 
             # Run profile for two steps, to include data loading time in between them.
@@ -922,7 +934,8 @@ def main_contained(config, logger):
                     )
                 else:
                     cum_metrics = output
-                training_io.log(step, logger, synth_metrics)
+                if batch.loss_masks is not None:
+                    training_io.log(step, logger, synth_metrics)
                 training_io.log(step, logger, cum_metrics)
                 cum_metrics = output
             else:

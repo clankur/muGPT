@@ -23,7 +23,7 @@ training:
 
 hf_dataset:
   path: iohadrubin/wikitext-103-raw-v1
-  name: en
+  name: default
   num_workers: 1 
   tokenizer: mistralai/Mistral-7B-v0.1 # may require huggingface-cli login
   sequences_packed_per_batch: 120

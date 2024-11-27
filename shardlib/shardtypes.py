@@ -372,24 +372,7 @@ def typed_shard_map(f, **kwargs):
         in_specs = tuple(
             make_partition_specs(param.annotation) for param in sig.parameters.values()
         )
-        return_annotation = sig.return_annotation
-        if typing.get_origin(return_annotation) is tuple:
-            out_specs = []
-            for arg in typing.get_args(return_annotation):
-                if typing.get_origin(arg) is Union:  # Handle Optional (Union[T, None])
-                    # Get the non-None type
-                    type_arg = next(
-                        (t for t in typing.get_args(arg) if t is not type(None)), None
-                    )
-                    if type_arg is None:
-                        out_specs.append(None)
-                    else:
-                        out_specs.append(make_partition_specs(type_arg))
-                else:
-                    out_specs.append(make_partition_specs(arg))
-            out_specs = tuple(out_specs)
-        else:
-            out_specs = make_partition_specs(return_annotation)
+        out_specs = make_partition_specs(sig.return_annotation)
         return jax.experimental.shard_map.shard_map(
             typechecked(f), in_specs=in_specs, out_specs=out_specs, mesh=mesh, **kwargs
         )(*args)

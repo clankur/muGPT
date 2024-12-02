@@ -1,6 +1,6 @@
 # python -m train --config-name=c4_a100x8x4_10m +paths.model_name=270m
 defaults:
-- synthetic_a100x8_base
+- synthetic_base
 - _self_
 
 num_hosts: 1
@@ -17,6 +17,7 @@ training:
   tokens:
     batch: 64 
   use_grad_clip: true
+  use_gpu: false
 
 model:
   d_model: 128

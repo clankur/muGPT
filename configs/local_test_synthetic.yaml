@@ -7,7 +7,7 @@ defaults:
 
 training:
   warmup_steps: 10
-  steps:        50
+  steps:        100
   steps_for_lr: 100
   tokens:
     batch: 64

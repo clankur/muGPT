@@ -375,7 +375,7 @@ class HuggingFaceDataLoader:
         ), "Tokenizer must have a special 0 token"
 
         # setup an iterator over the dataset
-        tokenize = functools.partial(
+        self.tokenize = functools.partial(
             self.tokenizer,
             padding=False,
             truncation=False,
@@ -388,7 +388,7 @@ class HuggingFaceDataLoader:
         dataset = load_dataset(config.path, config.name, streaming=True, split=split)
         dataset = dataset.shuffle(seed=config.seed)
         tokenized = dataset.select_columns(["text"]).map(
-            tokenize, input_columns=["text"], remove_columns=["text"]
+            self.tokenize, input_columns=["text"], remove_columns=["text"]
         )
         dataloader = DataLoader(
             tokenized,
@@ -416,7 +416,22 @@ class HuggingFaceDataLoader:
 
     def load(self, step):
         shape = (self.batch_size, self.max_seq_len)
-        batch, is_start = next(self.iterator)
+        try:
+            batch, is_start = next(self.iterator)
+        except StopIteration:
+            dataset = self.dataset.shuffle(seed=self.config.seed + step)
+            tokenized = dataset.select_columns(["text"]).map(
+                self.tokenize, input_columns=["text"], remove_columns=["text"]
+            )
+            dataloader = DataLoader(
+                tokenized,
+                num_workers=self.config.num_workers,
+                collate_fn=self.collate,
+                drop_last=True,
+                batch_size=self.config.sequences_packed_per_batch,
+            )
+            self.iterator = iter(dataloader)
+            batch, is_start = next(self.iterator)
 
         def get_shard(x: jax.Array, indexing: Tuple[slice]) -> jax.Array:
             shard = x[indexing]

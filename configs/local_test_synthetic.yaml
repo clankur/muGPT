@@ -26,9 +26,9 @@ model:
   rope_max_timescale: 256
 
   # parameters for mixattention
-  window_size: 128
-  ma_pair: true
-  block_starts: (0, 12)
+  window_size: 16 
+  shared_kv_idx: [0, 1]  
+  sa_layers: [0]
 
   a_attn: 1
   a_output: 1

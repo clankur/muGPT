@@ -27,6 +27,7 @@ import jax
 from dataclasses import dataclass
 from typeguard import typechecked
 import hydra
+from omegaconf.listconfig import ListConfig
 from typing import Any, Optional, Tuple, Union, List
 from functools import cached_property, partial
 from collections import defaultdict
@@ -73,8 +74,8 @@ class Hparams:
 
     # parameters for mixattention
     window_size: int
-    shared_kv_idx: tuple[int]
-    sa_layers: tuple[int]
+    shared_kv_idx: ListConfig[int]
+    sa_layers: ListConfig[int]
 
     base: BaseWidths
     # parameters for mup

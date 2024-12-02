@@ -375,7 +375,7 @@ class HuggingFaceDataLoader:
         ), "Tokenizer must have a special 0 token"
 
         # setup an iterator over the dataset
-        tokenize = functools.partial(
+        self.tokenize = functools.partial(
             self.tokenizer,
             padding=False,
             truncation=False,
@@ -391,7 +391,7 @@ class HuggingFaceDataLoader:
         self.config = config
         dataset = self.dataset.shuffle(seed=self.config.seed)
         tokenized = dataset.select_columns(["text"]).map(
-            tokenize, input_columns=["text"], remove_columns=["text"]
+            self.tokenize, input_columns=["text"], remove_columns=["text"]
         )
         dataloader = DataLoader(
             tokenized,
@@ -422,9 +422,9 @@ class HuggingFaceDataLoader:
         try:
             batch, is_start = next(self.iterator)
         except StopIteration:
-            self.dataset = self.dataset.shuffle(seed=self.config.seed + step)
-            tokenized = self.dataset.select_columns(["text"]).map(
-                self.tokenizer, input_columns=["text"], remove_columns=["text"]
+            dataset = self.dataset.shuffle(seed=self.config.seed + step)
+            tokenized = dataset.select_columns(["text"]).map(
+                self.tokenize, input_columns=["text"], remove_columns=["text"]
             )
             dataloader = DataLoader(
                 tokenized,

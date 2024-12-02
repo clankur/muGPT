@@ -308,6 +308,7 @@ def _div_exact(a: int, b: int) -> int:
 
 @functools.partial(jax.jit, donate_argnums=(0,))
 @typechecked
+@shardtypes.scope
 def _decode(encoded_tokens: u32[b"batch/d len"]) -> TokenBatch:
     # encoded_tokens encoding:
     #  2*id+1 for the first token in a sequence

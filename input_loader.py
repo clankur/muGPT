@@ -59,9 +59,9 @@ class TokenBatch:
 
     targets: u32["batch/d len"]
     is_seq_start: bool_["batch/d len"]
-    comment_starts: u32["batch/d n_prints"]
-    comment_ends: u32["batch/d n_prints"]
-    loss_masks: bool_["batch/d len"]
+    comment_starts: Union[u32["batch/d n_prints"], None] = None
+    comment_ends: Union[u32["batch/d n_prints"], None] = None
+    loss_masks: Union[bool_["batch/d len"], None] = None
 
 
 @dataclass(frozen=True)
@@ -308,6 +308,7 @@ def _div_exact(a: int, b: int) -> int:
 
 @functools.partial(jax.jit, donate_argnums=(0,))
 @typechecked
+@shardtypes.scope
 def _decode(encoded_tokens: u32[b"batch/d len"]) -> TokenBatch:
     # encoded_tokens encoding:
     #  2*id+1 for the first token in a sequence
@@ -375,7 +376,7 @@ class HuggingFaceDataLoader:
         ), "Tokenizer must have a special 0 token"
 
         # setup an iterator over the dataset
-        tokenize = functools.partial(
+        self.tokenize = functools.partial(
             self.tokenizer,
             padding=False,
             truncation=False,
@@ -385,17 +386,20 @@ class HuggingFaceDataLoader:
             return_attention_mask=False,
             return_tensors="np",
         )
-        dataset = load_dataset(config.path, config.name, streaming=True, split=split)
-        dataset = dataset.shuffle(seed=config.seed)
+        self.dataset = load_dataset(
+            config.path, config.name, streaming=True, split=split
+        )
+        self.config = config
+        dataset = self.dataset.shuffle(seed=self.config.seed)
         tokenized = dataset.select_columns(["text"]).map(
-            tokenize, input_columns=["text"], remove_columns=["text"]
+            self.tokenize, input_columns=["text"], remove_columns=["text"]
         )
         dataloader = DataLoader(
             tokenized,
-            num_workers=config.num_workers,
+            num_workers=self.config.num_workers,
             collate_fn=self.collate,
             drop_last=True,
-            batch_size=config.sequences_packed_per_batch,
+            batch_size=self.config.sequences_packed_per_batch,
         )
         self.iterator = iter(dataloader)
 
@@ -416,7 +420,22 @@ class HuggingFaceDataLoader:
 
     def load(self, step):
         shape = (self.batch_size, self.max_seq_len)
-        batch, is_start = next(self.iterator)
+        try:
+            batch, is_start = next(self.iterator)
+        except StopIteration:
+            dataset = self.dataset.shuffle(seed=self.config.seed + step)
+            tokenized = dataset.select_columns(["text"]).map(
+                self.tokenize, input_columns=["text"], remove_columns=["text"]
+            )
+            dataloader = DataLoader(
+                tokenized,
+                num_workers=self.config.num_workers,
+                collate_fn=self.collate,
+                drop_last=True,
+                batch_size=self.config.sequences_packed_per_batch,
+            )
+            self.iterator = iter(dataloader)
+            batch, is_start = next(self.iterator)
 
         def get_shard(x: jax.Array, indexing: Tuple[slice]) -> jax.Array:
             shard = x[indexing]

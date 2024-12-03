@@ -66,9 +66,10 @@ class Hparams:
     n_q_per_kv: int
     n_kv: int
     d_head: int
-    vocab: int
     d_ff: int
+    vocab: int
     layers: int
+
     base: BaseWidths
 
     # fields for position embeddings

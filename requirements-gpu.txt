@@ -1,5 +1,5 @@
 zarr
-fsspec[gcs]
+fsspec[gcs]==2023.6.0
 jax[cuda12]
 einops
 hydra-core

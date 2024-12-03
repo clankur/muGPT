@@ -27,7 +27,6 @@ import jax
 from dataclasses import dataclass
 from typeguard import typechecked
 import hydra
-from omegaconf.listconfig import ListConfig
 from typing import Any, Optional, Tuple, Union, List
 from functools import cached_property, partial
 from collections import defaultdict
@@ -384,16 +383,14 @@ class Model:
         @typechecked
         def loop_body(carry: Any, inputs: Any) -> Tuple[Any, Tuple[()]]:
             nonlocal kv_cache, cache_initialized
-
             x, layer_idx = carry
+            cache_idx, w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2 = inputs
 
             use_local_window_attn = jax.lax.cond(
                 jnp.isin(layer_idx, jnp.array(h.sa_layers)),
                 lambda: True,
                 lambda: False,
             )
-
-            cache_idx, w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2 = inputs
 
             # Pre-attention RMSNorm
             ln1 = shardops.all_gather("M/t/d -> M", jnp.float32(ln1))

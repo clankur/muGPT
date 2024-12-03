@@ -77,7 +77,7 @@ class Hparams:
 
     # parameters for mixattention
     window_size: int
-    n_shared_cache: int
+    n_kv_reuses: int
     shared_kv_idx: tuple[int]
     sa_layers: tuple[int]
 
@@ -351,7 +351,7 @@ class Model:
         x = shardops.index_unreduced("[V/t] M, B/d L -> B/d L M", embed, ids)
         x = shardops.psum_scatter("B/d L M -> B/d L M/t", x)
 
-        L = ids.shape[1]
+        B, L = ids.shape
         segment_ids = jnp.cumsum(is_seq_start, axis=1)
         segment_mask: bool_[b"B/d L L"] = (
             segment_ids[:, :, jnp.newaxis] == segment_ids[:, jnp.newaxis, :]
@@ -373,28 +373,11 @@ class Model:
         assert (
             len(h.shared_kv_idx) == h.layers
         ), f"Number of layers {h.layers} != length of shared_kv_idx {len(h.shared_kv_idx)}"
-        # kv_cache = jnp.zeros((2, ids.shape[0], h.n_kv, max(h.shared_kv_idx), h.d_head))
-        kv_cache = [None for _ in range(h.n_shared_cache)]
 
-        # Outer scan
-        # for i in range(num_layers / kv_reuses):
-        #     k, v = w_kv[i]
-        #     for j in range(kv_reuses):
-        #         layers[i]
-        #         normal_block(..., k, v)
-        # Transformer blocks.
-        # def outer_loop_body(carry: Any, inputs: Any) -> Tuple[Any, Tuple[()]]:
-        #   k, v = x @ kv_weights[i]
-        #   def inner_loop_body()
-        #   jax.lax.scan(x, layer_blocks[i], )
-        #   this callls inner_loop_body(carry, inputs) # uses k, v defined above
-
-        # problem is that layer 0 might use kv_cache[0] AND it will be reused by (non-consecutive) layers 4, 8
-        #   pretty much this solution would work of only consecutive layers reused the same cache
-        #       ie). blocks aren't really blocks for SA where they reuse the K, V from the last SA
-        #   other issue is what do we do about layers where we don't recompute k, v
-        #       ACTUALLY NOT ISSUE HERE YOU WOULD COMPUTE K, V for the cache block
-        # def loop_body(carry: Any, inputs: Any) -> Tuple[Any, Tuple[()]]:
+        kv_cache = jnp.zeros(
+            (h.n_kv_reuses, 2, B, L, h.n_kv, h.d_head), dtype=jnp.bfloat16
+        )  # n_kv_reuses 2 B/d L n_kv/t D
+        cache_initialized = jnp.zeros((h.n_kv_reuses,), dtype=jnp.bool_)
 
         @explicit_activation_checkpointing
         @typechecked
@@ -430,7 +413,7 @@ class Model:
 
             # need to change this to be so for the first ref of cache_idx populates it
             k, v = jax.lax.cond(
-                jnp.logical_not(kv_cache[cache_idx]),
+                cache_initialized[cache_idx],
                 lambda: hidden_mult
                 * shardops.einsum_unreduced(
                     "B/d L M, k_v M K/t D -> k_v B/d L K/t D", nx, w_kv
@@ -496,10 +479,10 @@ class Model:
             )
             ffn_out = shardops.psum_scatter("B/d L M -> B/d L M/t", ffn_out)
 
-            return (jnp.bfloat16(x + ffn_out), layer_idx + 1), (), ()
+            return (jnp.bfloat16(x + ffn_out), layer_idx + 1), ()
 
         shared_kv_idx = jnp.array(h.shared_kv_idx)
-        (x, _), (), () = jax.lax.scan(
+        (x, _), () = jax.lax.scan(
             loop_body,
             (jnp.bfloat16(x), 0),
             (

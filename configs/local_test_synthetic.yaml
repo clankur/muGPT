@@ -6,9 +6,9 @@ defaults:
 - _self_
 
 training:
-  warmup_steps: 10
-  steps:        100
-  steps_for_lr: 100
+  warmup_steps: 5
+  steps:        50
+  steps_for_lr: 50
   tokens:
     batch: 64
     len: 64
@@ -24,6 +24,16 @@ model:
   vocab: 32768 
   d_ff: 1024
   rope_max_timescale: 256
+
+  # parameters for mixattention
+  window_size: 16 
+  n_kv_reuses: 2
+  shared_kv_idx:
+    - 0
+    - 1 
+  sa_layers:
+    - 0 
+
   a_attn: 1
   a_output: 1
   zero_queries: true

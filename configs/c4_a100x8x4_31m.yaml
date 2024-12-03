@@ -1,40 +1,52 @@
 # python -m train --config-name=c4_a100x8x4_37m +paths.model_name=270m
 defaults:
-- c4_a100x8_base
-- _self_
+  - c4_a100x8_base
+  - _self_
 
 num_hosts: 4
 
 mesh:
-  d: 16 
+  d: 16
   t: 1
 
 training:
-  warmup_steps: 290 
-  steps:        2900 
-  steps_for_lr: 2900 
+  warmup_steps: 290
+  steps: 2900
+  steps_for_lr: 2900
   learning_rate: 7.3e-3
   tokens:
-    batch: 256 
+    batch: 256
 
 model:
-  d_model: 256 
+  d_model: 256
   n_q_per_kv: 1
-  n_kv: 16 
-  d_head: 64 
+  n_kv: 16
+  d_head: 64
+  d_ff: 1024
   layers: 8
-  d_ff: 1024 
   vocab: 32768
+
+  base:
+    d_model: 256
+    n_q_per_kv: 1
+    n_kv: 16
+    d_head: 64
+    d_ff: 1024
+
+  window_size: 128
+  reuse_kv_map: ((0, 0), (1, 0), (2, 1), (3, 1), (4, 2), (5, 3), (6, 3), (7, 2))
+  sa_layers: (4, 7)
+
   rope_max_timescale: 10000
   a_attn: 1.
   a_output: 1.
   zero_queries: true
   zero_unembed: true
-  base:
-    d_model: 256 
-    n_q_per_kv: 1
-    n_kv: 16 
-    d_head: 64
-    d_ff: 1024 
+
+  parameterization: "sp"
+  fully_aligned: false
+  gamma_embed: 1.
+  gamma_hidden: 1.
+  gamma_unembed: 1.
 
 checkpoint_interval: 9200

@@ -27,8 +27,12 @@ model:
 
   # parameters for mixattention
   window_size: 16 
-  shared_kv_idx: [0, 1]  
-  sa_layers: [0]
+  n_shared_cache: 2
+  shared_kv_idx:
+    - 0
+    - 1 
+  sa_layers:
+    - 0 
 
   a_attn: 1
   a_output: 1

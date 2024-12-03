@@ -77,8 +77,9 @@ class Hparams:
 
     # parameters for mixattention
     window_size: int
-    shared_kv_idx: ListConfig[int]
-    sa_layers: ListConfig[int]
+    n_shared_cache: int
+    shared_kv_idx: tuple[int]
+    sa_layers: tuple[int]
 
     base: BaseWidths
     # parameters for mup
@@ -368,24 +369,48 @@ class Model:
         causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
         rope_table = RopeTable.create(L, h)
 
-        cache_idx = 0
-        assert len(h.shared_kv_idx) == h.layers
-        kv_cache = jnp.zeros((2, ids.shape[0], h.n_kv, max(h.shared_kv_idx), h.d_head))
+        print(f"{type(h.shared_kv_idx)=}")
+        assert (
+            len(h.shared_kv_idx) == h.layers
+        ), f"Number of layers {h.layers} != length of shared_kv_idx {len(h.shared_kv_idx)}"
+        # kv_cache = jnp.zeros((2, ids.shape[0], h.n_kv, max(h.shared_kv_idx), h.d_head))
+        kv_cache = [None for _ in range(h.n_shared_cache)]
 
+        # Outer scan
+        # for i in range(num_layers / kv_reuses):
+        #     k, v = w_kv[i]
+        #     for j in range(kv_reuses):
+        #         layers[i]
+        #         normal_block(..., k, v)
         # Transformer blocks.
+        # def outer_loop_body(carry: Any, inputs: Any) -> Tuple[Any, Tuple[()]]:
+        #   k, v = x @ kv_weights[i]
+        #   def inner_loop_body()
+        #   jax.lax.scan(x, layer_blocks[i], )
+        #   this callls inner_loop_body(carry, inputs) # uses k, v defined above
+
+        # problem is that layer 0 might use kv_cache[0] AND it will be reused by (non-consecutive) layers 4, 8
+        #   pretty much this solution would work of only consecutive layers reused the same cache
+        #       ie). blocks aren't really blocks for SA where they reuse the K, V from the last SA
+        #   other issue is what do we do about layers where we don't recompute k, v
+        #       ACTUALLY NOT ISSUE HERE YOU WOULD COMPUTE K, V for the cache block
+        # def loop_body(carry: Any, inputs: Any) -> Tuple[Any, Tuple[()]]:
+
         @explicit_activation_checkpointing
         @typechecked
-        def loop_body(carry: Any, layer_weights: Any) -> Tuple[Any, Tuple[()]]:
+        def loop_body(carry: Any, inputs: Any) -> Tuple[Any, Tuple[()]]:
+            nonlocal kv_cache
 
             x, layer_idx = carry
 
-            use_local_window_attn = True
-            if layer_idx in h.sa_layers:
-                use_local_window_attn = False
+            use_local_window_attn = jax.lax.cond(
+                jnp.isin(layer_idx, jnp.array(h.sa_layers)),
+                lambda: True,
+                lambda: False,
+            )
 
-            cache_idx = h.shared_kv_idx[layer_idx]
-
-            w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2 = layer_weights
+            cache_idx, w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2 = inputs
+            jax.debug.print("cache_idx={v}", v=cache_idx)
 
             # Pre-attention RMSNorm
             ln1 = shardops.all_gather("M/t/d -> M", jnp.float32(ln1))
@@ -402,17 +427,16 @@ class Model:
             )
             q = rope_table.apply("L D -> 1 L 1 1 D", q)
             w_kv = shardops.all_gather("2 M/d K/t D -> 2 M K/t D", jnp.bfloat16(w_kv))
-            if layer_idx == cache_idx[1]:
-                k, v = hidden_mult * shardops.einsum_unreduced(
+
+            # need to change this to be so for the first ref of cache_idx populates it
+            k, v = jax.lax.cond(
+                jnp.logical_not(kv_cache[cache_idx]),
+                lambda: hidden_mult
+                * shardops.einsum_unreduced(
                     "B/d L M, k_v M K/t D -> k_v B/d L K/t D", nx, w_kv
-                )
-                kv_cache = (
-                    kv_cache[:, :, cache_idx[1], :]
-                    .at[:, :, :, :]
-                    .set(jnp.stack([k, v], axis=0))
-                )
-            else:
-                k, v = kv_cache[:, :, cache_idx[1], :]
+                ),
+                lambda: kv_cache[cache_idx],
+            )
 
             k = save_for_backward(k)
             v = save_for_backward(v)
@@ -472,12 +496,14 @@ class Model:
             )
             ffn_out = shardops.psum_scatter("B/d L M -> B/d L M/t", ffn_out)
 
-            return (jnp.bfloat16(x + ffn_out), layer_idx + 1), ()
+            return (jnp.bfloat16(x + ffn_out), layer_idx + 1), (), ()
 
-        (x, _), () = jax.lax.scan(
+        shared_kv_idx = jnp.array(h.shared_kv_idx)
+        (x, _), (), () = jax.lax.scan(
             loop_body,
             (jnp.bfloat16(x), 0),
             (
+                shared_kv_idx,
                 self.w_q,
                 self.w_kv,
                 self.w_o,

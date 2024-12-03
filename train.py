@@ -81,7 +81,6 @@ class Hparams:
     shared_kv_idx: tuple[int]
     sa_layers: tuple[int]
 
-    base: BaseWidths
     # parameters for mup
     a_attn: float
     a_output: float
@@ -369,7 +368,6 @@ class Model:
         causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
         rope_table = RopeTable.create(L, h)
 
-        print(f"{type(h.shared_kv_idx)=}")
         assert (
             len(h.shared_kv_idx) == h.layers
         ), f"Number of layers {h.layers} != length of shared_kv_idx {len(h.shared_kv_idx)}"

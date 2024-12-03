@@ -376,13 +376,16 @@ class Model:
 
         kv_cache = jnp.zeros(
             (h.n_kv_reuses, 2, B, L, h.n_kv, h.d_head), dtype=jnp.bfloat16
-        )  # n_kv_reuses 2 B/d L n_kv/t D
+        )
+        kv_cache = shardops.psum_scatter(
+            "n_kv_reuses k_v B/d L K D -> n_kv_reuses k_v B/d L K/t D", kv_cache
+        )
         cache_initialized = jnp.zeros((h.n_kv_reuses,), dtype=jnp.bool_)
 
         @explicit_activation_checkpointing
         @typechecked
         def loop_body(carry: Any, inputs: Any) -> Tuple[Any, Tuple[()]]:
-            nonlocal kv_cache
+            nonlocal kv_cache, cache_initialized
 
             x, layer_idx = carry
 
@@ -393,7 +396,6 @@ class Model:
             )
 
             cache_idx, w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2 = inputs
-            jax.debug.print("cache_idx={v}", v=cache_idx)
 
             # Pre-attention RMSNorm
             ln1 = shardops.all_gather("M/t/d -> M", jnp.float32(ln1))
@@ -411,15 +413,21 @@ class Model:
             q = rope_table.apply("L D -> 1 L 1 1 D", q)
             w_kv = shardops.all_gather("2 M/d K/t D -> 2 M K/t D", jnp.bfloat16(w_kv))
 
-            # need to change this to be so for the first ref of cache_idx populates it
-            k, v = jax.lax.cond(
-                cache_initialized[cache_idx],
-                lambda: hidden_mult
-                * shardops.einsum_unreduced(
+            def populate_cache():
+                nonlocal kv_cache, cache_initialized
+                kv = hidden_mult * shardops.einsum_unreduced(
                     "B/d L M, k_v M K/t D -> k_v B/d L K/t D", nx, w_kv
-                ),
-                lambda: kv_cache[cache_idx],
+                )
+                kv_cache = kv_cache.at[cache_idx].set(kv)
+                cache_initialized = cache_initialized.at[cache_idx].set(True)
+                return kv_cache, cache_initialized
+
+            kv_cache, cache_initialized = jax.lax.cond(
+                cache_initialized[cache_idx],
+                lambda: (kv_cache, cache_initialized),
+                populate_cache,
             )
+            k, v = kv_cache[cache_idx]
 
             k = save_for_backward(k)
             v = save_for_backward(v)

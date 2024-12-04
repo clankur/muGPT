@@ -10,13 +10,13 @@ mesh:
   t: 1
 
 training:
-  warmup_steps: 6105
-  steps:        61050
-  steps_for_lr: 61050
+  warmup_steps: 12210
+  steps:        122100
+  steps_for_lr: 122100
   learning_rate: 7.3e-3
   tokens:
+    batch: 8 
     len: 1024
-    batch: 16
   use_grad_clip: true
   use_gpu: true
 

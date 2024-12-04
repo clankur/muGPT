@@ -25,20 +25,42 @@ model:
   n_q_per_kv: 1
   n_kv: 16
   d_head: 128
-  layers: 8
   d_ff: 4096 
   vocab: 49 
-  rope_max_timescale: 10000
-  a_attn: 1.
-  a_output: 1.
-  zero_queries: true
-  zero_unembed: true
+  layers: 8
+
   base:
     d_model: 256 
     n_q_per_kv: 1
     n_kv: 16 
     d_head: 64 
     d_ff: 1024 
+ 
+  rope_max_timescale: 10000
+
+  # parameters for mixattention
+  window_size: 16 
+  n_kv_reuses: 2
+  shared_kv_idx:
+    - 0
+    - 1 
+    - 1
+    - 2
+    - 2
+    - 0
+    - 3
+    - 3
+  sa_layers:
+    - 0 
+    - 5 
+
+  # parameters for mup
+  a_attn: 1.
+  a_output: 1.
+  zero_queries: true
+  zero_unembed: true
+
+  # parameters for exp scaling
   parameterization: "sp" 
   fully_aligned: false
   gamma_embed: 1. 

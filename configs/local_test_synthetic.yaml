@@ -6,9 +6,9 @@ defaults:
 - _self_
 
 training:
-  warmup_steps: 10
-  steps:        100
-  steps_for_lr: 100
+  warmup_steps: 5
+  steps:        50
+  steps_for_lr: 50
   tokens:
     batch: 64
     len: 64

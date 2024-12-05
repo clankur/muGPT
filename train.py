@@ -841,7 +841,7 @@ def main_contained(config, logger):
         )
 
         model_dir = os.path.join(config.paths.root_working_dir, model_name)
-        # training_io.mkdir(model_dir)
+        training_io.mkdir(model_dir)
         state = jax.jit(partial(State.init, config.model))(
             fold_in_str(root_rng, "init")
         )
@@ -870,8 +870,8 @@ def main_contained(config, logger):
             cum_metrics.learning_rate += metrics.learning_rate
 
         for step in range(start_step, config.training.steps):
-            # if step % config.checkpoint_interval == 0 and step > start_step:
-            #   training_io.save_checkpoint(model_dir, step, state, config.io)
+            if step % config.checkpoint_interval == 0 and step > start_step:
+                training_io.save_checkpoint(model_dir, step, state, config.io)
 
             # We profile on the second step, because the first step has a long pause for XLA
             # compilation and initial shuffle buffer loading.

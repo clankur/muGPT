@@ -26,11 +26,12 @@ def get_configs(task_ids):
     return configs
 
 
-def get_loss_data(task_ids):
+def get_loss_data(task_ids, truncate=False):
     loss_data = {}
+    min_n_values = float("inf")
     for task_id in task_ids:
         task = Task.get_task(task_id=task_id)
-        scalar_logs = task.get_reported_scalars()
+        scalar_logs = task.get_reported_scalars(max_samples=5000)
 
         x_values = scalar_logs["loss"]["loss"]["x"]
         y_values = scalar_logs["loss"]["loss"]["y"]
@@ -38,7 +39,23 @@ def get_loss_data(task_ids):
         task_name = task.name
 
         loss_data[task_id] = {"name": task_name, "steps": x_values, "loss": y_values}
+        min_n_values = min(max(x_values), min_n_values)
+    if truncate:
+        for task_id, data in loss_data.items():
+            index = next(
+                (i for i, x in enumerate(data["steps"]) if x >= min_n_values), None
+            )
+            data["steps"] = data["steps"][:index]
+            data["loss"] = data["loss"][:index]
     return loss_data
+
+
+def get_synthetic_metrics(task_ids):
+    synthetic_data = {}
+    for task_id in task_ids:
+        task = Task.get_task(task_id=task_id)
+        scalar_logs = task.get_reported_scalars()
+        print(scalar_logs)
 
 
 def calculate_ema(data, smoothing=0.97):

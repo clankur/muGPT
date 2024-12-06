@@ -1,5 +1,29 @@
 from clearml import Task
 import matplotlib.pyplot as plt
+import yaml
+
+
+def get_configs(task_ids):
+    configs = {}
+    for task_id in task_ids:
+        task = Task.get_task(task_id=task_id)
+        task_name = task.name
+        task_settings = task.export_task()
+
+        task_config = yaml.safe_load(
+            task_settings["configuration"]["OmegaConf"]["value"]
+        )
+        task_config = {
+            "training": task_config.get("training"),
+            "model": task_config.get("model"),
+        }
+        task_config = yaml.dump(task_config, default_flow_style=False)
+
+        configs[task_id] = {
+            "name": task_name,
+            "config": task_config,
+        }
+    return configs
 
 
 def get_loss_data(task_ids):

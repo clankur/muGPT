@@ -839,6 +839,7 @@ def main_contained(config, logger):
             if config.paths.model_name
             else get_model_name(config_name)
         )
+        print(model_name)
 
         model_dir = os.path.join(config.paths.root_working_dir, model_name)
         training_io.mkdir(model_dir)
@@ -966,8 +967,19 @@ def clear_tpu_locks():
 
 def get_model_name(config_name: str):
     overrides = hydra.core.hydra_config.HydraConfig.get()["job"]["override_dirname"]
-    overrides = ",".join(overrides.split(",")[1:]).replace("=", ":")
-    return f"{config_name}_{overrides}" if overrides else config_name
+    ignore_overrides = [
+        "training.queue",
+    ]
+    overrides = [
+        override.lstrip("+")
+        for override in overrides.split(",")
+        if override.lstrip("+").split("=")[0] not in ignore_overrides
+    ]
+
+    overrides = "_".join(overrides)
+    return (
+        f"{config_name}_{overrides}" if overrides else config_name
+    )
 
 
 @hydra.main(config_path="configs", version_base=None)

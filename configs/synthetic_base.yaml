@@ -24,7 +24,7 @@ training:
 
 paths:
   # root_working_dir can also be a path on a local filesystem
-  root_working_dir: "/tmp"
+  root_working_dir: "/media/clankur/HDD/models"
 
 num_hosts: 1
 

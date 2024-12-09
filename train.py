@@ -840,17 +840,18 @@ def main_contained(config, logger):
             if config.paths.model_name
             else get_model_name(config_name)
         )
+        model_dir = os.path.join(config.paths.root_working_dir, model_name)
         print(model_name)
 
-        model_dir = os.path.join(config.paths.root_working_dir, model_name)
-        training_io.mkdir(model_dir)
         state = jax.jit(partial(State.init, config.model))(
             fold_in_str(root_rng, "init")
         )
         if config.training.use_checkpoint:
-            state, start_step = training_io.load_checkpoint_if_it_exists(
-                model_dir, state, config.io
-            )
+            training_io.mkdir(model_dir)
+
+        state, start_step = training_io.load_checkpoint_if_it_exists(
+            model_dir, state, config.io
+        )
 
         # Explicitly compile training step, to record XLA HLO graph.
         # See https://bnikolic.co.uk/blog/python/jax/2022/02/22/jax-outputgraph-rev

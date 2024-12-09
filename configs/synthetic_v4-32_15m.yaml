@@ -15,7 +15,7 @@ training:
   steps_for_lr: 2900 
   learning_rate: 7.3e-3
   tokens:
-    batch: 256 
+    batch: 32
   use_grad_clip: true
 
 model:
@@ -51,3 +51,8 @@ model:
   gamma_unembed: 1.
   
 checkpoint_interval: 9200
+
+paths:
+  # root_working_dir can also be a path on a local filesystem
+  root_working_dir: "/tmp"
+

@@ -73,6 +73,9 @@ class Hparams:
 
     # fields for position embeddings
     rope_max_timescale: int
+    cope_n_pos_max: int
+    apply_cope: bool
+    apply_rope: bool
 
     # parameters for mup
     a_attn: float
@@ -356,7 +359,11 @@ class Model:
         )[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
         causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
 
-        rope_table = RopeTable.create(L, h)
+        if h.apply_rope:
+            rope_table = RopeTable.create(L, h)
+
+        if h.apply_cope:
+            cope = Cope.create(h)
 
         # Transformer blocks.
         @explicit_activation_checkpointing
@@ -379,14 +386,16 @@ class Model:
                     "B/d L M, M Q K/t D -> B/d L Q K/t D", nx, w_q
                 )
             )
-            q = rope_table.apply("L D -> 1 L 1 1 D", q)
+            if h.apply_rope:
+                q = rope_table.apply("L D -> 1 L 1 1 D", q)
             w_kv = shardops.all_gather("2 M/d K/t D -> 2 M K/t D", jnp.bfloat16(w_kv))
             k, v = hidden_mult * shardops.einsum_unreduced(
                 "B/d L M, k_v M K/t D -> k_v B/d L K/t D", nx, w_kv
             )
             k = save_for_backward(k)
             v = save_for_backward(v)
-            k = rope_table.apply("L d -> 1 L 1 d", k)
+            if h.apply_rope:
+                k = rope_table.apply("L d -> 1 L 1 d", k)
 
             logit_scale = jax.lax.select(
                 h.parameterization.lower() == "mup",
@@ -400,6 +409,8 @@ class Model:
                 preferred_element_type=jnp.float32,
             )
             logits = jnp.where(causal_mask, logits, -1e10)
+            if h.apply_cope:
+                logits += cope.apply(q, logits)
             probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
             attn_out = shardops.einsum_unreduced(
                 "B/d Qlen Klen Q K/t, B/d Klen K/t D -> B/d Qlen Q K/t D", probs, v
@@ -552,6 +563,48 @@ class Model:
             -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch),
             synth_metrics,
         )
+
+
+@pytree_dataclass
+class Cope:
+    pos_emb: f32["max_len d_head"]
+    n_max: int
+
+    @staticmethod
+    def create(hparams: Hparams) -> "Cope":
+        n_max = hparams.cope_n_pos_max
+        pos_emb = jnp.zeros((n_max, hparams.d_head), dtype=jnp.float32)
+        return Cope(pos_emb=pos_emb, n_max=n_max)
+
+    def apply(
+        self, query: f32["B/d Qlen Q K/t D"], logits: f32["B/d Qlen Klen Q K/t"]
+    ) -> f32["B/d Qlen Klen Q K/t"]:
+        gates = jax.nn.sigmoid(logits)
+
+        positions = jnp.flip(jnp.cumsum(jnp.flip(gates, axis=-1), axis=-1), axis=-1)
+        positions = jnp.clip(positions, a_max=self.n_max - 1)
+
+        pos_floor = jnp.floor(positions).astype(jnp.int32)
+        pos_ceil = jnp.ceil(positions).astype(jnp.int32)
+
+        z_p = shardops.einsum_unreduced(
+            "B/d Qlen Q K/t D, n_max D -> B/d Qlen Q K/t n_max", query, self.pos_emb
+        )
+
+        z_p_ceil = shardops.index_unreduced(
+            "B/d Qlen Q K/t [n_max], B/d Qlen Klen Q K/t -> B/d Qlen Klen Q K/t ",
+            z_p,
+            pos_ceil,
+        )
+        z_p_floor = shardops.index_unreduced(
+            "B/d Qlen Q K/t [n_max], B/d Qlen Klen Q K/t -> B/d Qlen Klen Q K/t ",
+            z_p,
+            pos_floor,
+        )
+
+        # Interpolation factor
+        w = positions - pos_floor
+        return w * z_p_ceil + (1 - w) * z_p_floor
 
 
 @pytree_dataclass

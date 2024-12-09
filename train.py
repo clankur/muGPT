@@ -616,6 +616,7 @@ class TrainingHparams:
     queue: Optional[str] = None
     use_grad_clip: bool = True
     use_gpu: bool = False
+    use_checkpoint: bool = False
 
 
 @pytree_dataclass
@@ -846,9 +847,10 @@ def main_contained(config, logger):
         state = jax.jit(partial(State.init, config.model))(
             fold_in_str(root_rng, "init")
         )
-        state, start_step = training_io.load_checkpoint_if_it_exists(
-            model_dir, state, config.io
-        )
+        if config.training.use_checkpoint:
+            state, start_step = training_io.load_checkpoint_if_it_exists(
+                model_dir, state, config.io
+            )
 
         # Explicitly compile training step, to record XLA HLO graph.
         # See https://bnikolic.co.uk/blog/python/jax/2022/02/22/jax-outputgraph-rev
@@ -871,7 +873,11 @@ def main_contained(config, logger):
             cum_metrics.learning_rate += metrics.learning_rate
 
         for step in range(start_step, config.training.steps):
-            if step % config.checkpoint_interval == 0 and step > start_step:
+            if (
+                config.training.use_checkpoint
+                and step % config.checkpoint_interval == 0
+                and step > start_step
+            ):
                 training_io.save_checkpoint(model_dir, step, state, config.io)
 
             # We profile on the second step, because the first step has a long pause for XLA
@@ -977,9 +983,7 @@ def get_model_name(config_name: str):
     ]
 
     overrides = "_".join(overrides)
-    return (
-        f"{config_name}_{overrides}" if overrides else config_name
-    )
+    return f"{config_name}_{overrides}" if overrides else config_name
 
 
 @hydra.main(config_path="configs", version_base=None)

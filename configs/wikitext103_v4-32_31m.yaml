@@ -1,12 +1,12 @@
-# python -m train --config-name=c4_a100x8x4_10m +paths.model_name=270m
+# python -m train --config-name=c4_a100x8x4_37m +paths.model_name=270m
 defaults:
-- synthetic_base
+- wikitext103_base
 - _self_
 
 num_hosts: 4
 
 mesh:
-  d: 16
+  d: 16 
   t: 1
 
 training:
@@ -19,13 +19,13 @@ training:
   use_grad_clip: true
 
 model:
-  d_model: 256
+  d_model: 256 
   n_q_per_kv: 1
   n_kv: 16 
   d_head: 64 
   d_ff: 1024 
   layers: 8
-  vocab: 49 
+  vocab: 32768
 
   base:
     d_model: 256 
@@ -51,3 +51,4 @@ model:
   gamma_unembed: 1.
   
 checkpoint_interval: 9200
+

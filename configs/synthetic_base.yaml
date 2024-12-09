@@ -20,6 +20,7 @@ training:
   learning_rate: 3.e-4
   cosine_learning_rate_final_fraction: 0.1
   use_grad_clip: true
+  use_gpu: false
 
 
 paths:

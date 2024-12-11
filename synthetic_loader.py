@@ -1,4 +1,5 @@
 import math
+import jax
 import jax.numpy as jnp
 from typing import Tuple, List, Optional
 import random
@@ -54,7 +55,7 @@ class SyntheticTokenizer:
 
 class SyntheticGenerator:
 
-    def __init__(self, seed: int, seq_length: int, batch_size: int):
+    def __init__(self, seq_length: int, batch_size: int):
         self.variables = {}
         self.funcs = {}
         self.trie = VariableTrie()
@@ -68,7 +69,6 @@ class SyntheticGenerator:
         self.func_freq = 0.025
         self.pattern_cap = 5
         self.n_generate_funcs = 2
-        random.seed(seed)
 
     def generate_random_variable(self):
         """Generate a random lowercase variable name, randomly use last 3 entries as a prefix"""

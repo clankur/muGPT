@@ -411,6 +411,7 @@ class Model:
             logits = jnp.where(causal_mask, logits, -1e10)
             if h.apply_cope:
                 logits += cope.apply(q, logits)
+
             probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
             attn_out = shardops.einsum_unreduced(
                 "B/d Qlen Klen Q K/t, B/d Klen K/t D -> B/d Qlen Q K/t D", probs, v
@@ -588,16 +589,19 @@ class Cope:
         pos_ceil = jnp.ceil(positions).astype(jnp.int32)
 
         z_p = shardops.einsum_unreduced(
-            "B/d Qlen Q K/t D, n_max D -> B/d Qlen Q K/t n_max", query, self.pos_emb
+            "B/d Qlen Q K/t D, n_max D -> B/d Qlen Q K/t n_max",
+            query,
+            self.pos_emb,
+            preferred_element_type=jnp.float32,
         )
 
         z_p_ceil = shardops.index_unreduced(
-            "B/d Qlen Q K/t [n_max], B/d Qlen Klen Q K/t -> B/d Qlen Klen Q K/t ",
+            "B/d Qlen Q K/t [n_max], B/d Qlen Klen Q K/t -> B/d Qlen Klen Q K/t",
             z_p,
             pos_ceil,
         )
         z_p_floor = shardops.index_unreduced(
-            "B/d Qlen Q K/t [n_max], B/d Qlen Klen Q K/t -> B/d Qlen Klen Q K/t ",
+            "B/d Qlen Q K/t [n_max], B/d Qlen Klen Q K/t -> B/d Qlen Klen Q K/t",
             z_p,
             pos_floor,
         )
@@ -947,7 +951,7 @@ def main_contained(config, logger):
                 tokens = dataclasses.replace(
                     config.training.tokens,
                     len=config.training.tokens.len * 2,
-                    batch=config.training.tokens.batch // 2,
+                    batch=max(config.mesh.d, config.training.tokens.batch // 2),
                 )
                 config = dataclasses.replace(
                     config, training=dataclasses.replace(config.training, tokens=tokens)

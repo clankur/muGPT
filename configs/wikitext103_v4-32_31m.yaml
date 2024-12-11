@@ -17,6 +17,8 @@ training:
   tokens:
     batch: 256 
   use_grad_clip: true
+  use_gpu: false
+  use_checkpoint: false
 
 model:
   d_model: 256 
@@ -51,4 +53,9 @@ model:
   gamma_unembed: 1.
   
 checkpoint_interval: 9200
+
+paths:
+  # root_working_dir can also be a path on a local filesystem
+  root_working_dir: "/tmp"
+
 

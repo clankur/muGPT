@@ -947,7 +947,7 @@ def main_contained(config, logger):
                 tokens = dataclasses.replace(
                     config.training.tokens,
                     len=config.training.tokens.len * 2,
-                    batch=config.training.tokens.batch // 2,
+                    batch=max(config.mesh.d, config.training.tokens.batch // 2),
                 )
                 config = dataclasses.replace(
                     config, training=dataclasses.replace(config.training, tokens=tokens)

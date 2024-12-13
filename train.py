@@ -27,7 +27,7 @@ import jax
 from dataclasses import dataclass
 from typeguard import typechecked
 import hydra
-from typing import Any, Optional, Tuple, Union
+from typing import Any, Optional, Tuple, Union, List
 from functools import cached_property, partial
 from collections import defaultdict
 import datetime
@@ -66,13 +66,20 @@ class Hparams:
     n_q_per_kv: int
     n_kv: int
     d_head: int
-    vocab: int
     d_ff: int
+    vocab: int
     layers: int
+
     base: BaseWidths
 
     # fields for position embeddings
     rope_max_timescale: int
+
+    # parameters for mixattention
+    window_size: int
+    n_kv_reuses: int
+    shared_kv_idx: tuple[int]
+    sa_layers: tuple[int]
 
     # parameters for mup
     a_attn: float
@@ -345,7 +352,7 @@ class Model:
 
         x = shardops.psum_scatter("B/d L M -> B/d L M/t", x)
 
-        L = ids.shape[1]
+        B, L = ids.shape
         segment_ids = jnp.cumsum(is_seq_start, axis=1)
         segment_mask: bool_[b"B/d L L"] = (
             segment_ids[:, :, jnp.newaxis] == segment_ids[:, jnp.newaxis, :]
@@ -356,17 +363,37 @@ class Model:
         causal_mask: bool_[b"1 L L 1 1"] = jnp.tril(
             jnp.ones((L, L), dtype=jnp.bool_), 0
         )[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
-        causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
+        local_mask: bool_[b"1 L L 1 1"] = jnp.triu(
+            jnp.ones((L, L), dtype=jnp.bool_), 1 - h.window_size
+        )[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
 
+        causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
         rope_table = RopeTable.create(L, h)
 
-        # Transformer blocks.
+        assert (
+            len(h.shared_kv_idx) == h.layers
+        ), f"Number of layers {h.layers} != length of shared_kv_idx {len(h.shared_kv_idx)}"
+
+        kv_cache = jnp.zeros(
+            (h.n_kv_reuses, 2, B, L, h.n_kv, h.d_head), dtype=jnp.bfloat16
+        )
+        kv_cache = shardops.psum_scatter(
+            "n_kv_reuses k_v B/d L K D -> n_kv_reuses k_v B/d L K/t D", kv_cache
+        )
+        cache_initialized = jnp.zeros((h.n_kv_reuses,), dtype=jnp.bool_)
+
         @explicit_activation_checkpointing
         @typechecked
-        def loop_body(
-            x: bf16[b"B/d L M/t"], layer_weights: Any
-        ) -> Tuple[bf16[b"B/d L M/t"], Tuple[()]]:
-            w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2 = layer_weights
+        def loop_body(carry: Any, inputs: Any) -> Tuple[Any, Tuple[()]]:
+            nonlocal kv_cache, cache_initialized
+            x, layer_idx = carry
+            cache_idx, w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2 = inputs
+
+            use_local_window_attn = jax.lax.cond(
+                jnp.isin(layer_idx, jnp.array(h.sa_layers)),
+                lambda: True,
+                lambda: False,
+            )
 
             # Pre-attention RMSNorm
             ln1 = shardops.all_gather("M/t/d -> M", jnp.float32(ln1))
@@ -383,9 +410,23 @@ class Model:
             )
             q = rope_table.apply("L D -> 1 L 1 1 D", q)
             w_kv = shardops.all_gather("2 M/d K/t D -> 2 M K/t D", jnp.bfloat16(w_kv))
-            k, v = hidden_mult * shardops.einsum_unreduced(
-                "B/d L M, k_v M K/t D -> k_v B/d L K/t D", nx, w_kv
+
+            def populate_cache():
+                nonlocal kv_cache, cache_initialized
+                kv = hidden_mult * shardops.einsum_unreduced(
+                    "B/d L M, k_v M K/t D -> k_v B/d L K/t D", nx, w_kv
+                )
+                kv_cache = kv_cache.at[cache_idx].set(kv)
+                cache_initialized = cache_initialized.at[cache_idx].set(True)
+                return kv_cache, cache_initialized
+
+            kv_cache, cache_initialized = jax.lax.cond(
+                cache_initialized[cache_idx],
+                lambda: (kv_cache, cache_initialized),
+                populate_cache,
             )
+            k, v = kv_cache[cache_idx]
+
             k = save_for_backward(k)
             v = save_for_backward(v)
             k = rope_table.apply("L d -> 1 L 1 d", k)
@@ -401,7 +442,13 @@ class Model:
                 k,
                 preferred_element_type=jnp.float32,
             )
-            logits = jnp.where(causal_mask, logits, -1e10)
+
+            attn_mask: bool_[b"B/d L L 1 1"] = jax.lax.select(
+                use_local_window_attn,
+                jnp.logical_and(causal_mask, local_mask),
+                causal_mask,
+            )
+            logits = jnp.where(attn_mask, logits, -1e10)
             probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
             attn_out = shardops.einsum_unreduced(
                 "B/d Qlen Klen Q K/t, B/d Klen K/t D -> B/d Qlen Q K/t D", probs, v
@@ -438,12 +485,14 @@ class Model:
             )
             ffn_out = shardops.psum_scatter("B/d L M -> B/d L M/t", ffn_out)
 
-            return jnp.bfloat16(x + ffn_out), ()
+            return (jnp.bfloat16(x + ffn_out), layer_idx + 1), ()
 
-        x, () = jax.lax.scan(
+        shared_kv_idx = jnp.array(h.shared_kv_idx)
+        (x, _), () = jax.lax.scan(
             loop_body,
-            jnp.bfloat16(x),
+            (jnp.bfloat16(x), 0),
             (
+                shared_kv_idx,
                 self.w_q,
                 self.w_kv,
                 self.w_o,

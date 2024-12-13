@@ -347,7 +347,9 @@ class Model:
         embed = embed_mult * shardops.all_gather(
             "V/t M/d -> V/t M", jnp.bfloat16(self.embed)
         )
-        x = shardops.index_unreduced("[V/t] M, B/d L -> B/d L M", embed, ids)
+        one_hot_ids = jax.nn.one_hot(ids, self.embed.shape[0])
+        x = shardops.einsum_unreduced("B/d L V/t, V/t M -> B/d L M", one_hot_ids, embed)
+
         x = shardops.psum_scatter("B/d L M -> B/d L M/t", x)
 
         B, L = ids.shape
@@ -665,6 +667,7 @@ class TrainingHparams:
     queue: Optional[str] = None
     use_grad_clip: bool = True
     use_gpu: bool = False
+    use_checkpoint: bool = False
 
 
 @pytree_dataclass
@@ -888,12 +891,15 @@ def main_contained(config, logger):
             if config.paths.model_name
             else get_model_name(config_name)
         )
-
         model_dir = os.path.join(config.paths.root_working_dir, model_name)
-        # training_io.mkdir(model_dir)
+        print(model_name)
+
         state = jax.jit(partial(State.init, config.model))(
             fold_in_str(root_rng, "init")
         )
+        if config.training.use_checkpoint:
+            training_io.mkdir(model_dir)
+
         state, start_step = training_io.load_checkpoint_if_it_exists(
             model_dir, state, config.io
         )
@@ -919,8 +925,12 @@ def main_contained(config, logger):
             cum_metrics.learning_rate += metrics.learning_rate
 
         for step in range(start_step, config.training.steps):
-            # if step % config.checkpoint_interval == 0 and step > start_step:
-            #   training_io.save_checkpoint(model_dir, step, state, config.io)
+            if (
+                config.training.use_checkpoint
+                and step % config.checkpoint_interval == 0
+                and step > start_step
+            ):
+                training_io.save_checkpoint(model_dir, step, state, config.io)
 
             # We profile on the second step, because the first step has a long pause for XLA
             # compilation and initial shuffle buffer loading.
@@ -935,7 +945,7 @@ def main_contained(config, logger):
                 tokens = dataclasses.replace(
                     config.training.tokens,
                     len=config.training.tokens.len * 2,
-                    batch=config.training.tokens.batch // 2,
+                    batch=max(config.mesh.d, config.training.tokens.batch // 2),
                 )
                 config = dataclasses.replace(
                     config, training=dataclasses.replace(config.training, tokens=tokens)
@@ -1015,7 +1025,16 @@ def clear_tpu_locks():
 
 def get_model_name(config_name: str):
     overrides = hydra.core.hydra_config.HydraConfig.get()["job"]["override_dirname"]
-    overrides = ",".join(overrides.split(",")[1:]).replace("=", ":")
+    ignore_overrides = [
+        "training.queue",
+    ]
+    overrides = [
+        override.lstrip("+")
+        for override in overrides.split(",")
+        if override.lstrip("+").split("=")[0] not in ignore_overrides
+    ]
+
+    overrides = "_".join(overrides)
     return f"{config_name}_{overrides}" if overrides else config_name
 
 

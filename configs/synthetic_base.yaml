@@ -20,11 +20,12 @@ training:
   learning_rate: 3.e-4
   cosine_learning_rate_final_fraction: 0.1
   use_grad_clip: true
+  use_checkpoint: true
 
 
 paths:
   # root_working_dir can also be a path on a local filesystem
-  root_working_dir: "/tmp"
+  root_working_dir: "/media/clankur/HDD/models"
 
 num_hosts: 1
 

@@ -463,9 +463,12 @@ class SyntheticDataLoader:
         token_batch_params: TokenBatchParams,
     ):
         assert split in ["train", "validation"], "Invalid split"
-        self.base_seed = config.seed + (1 if split == "validation" else 0)
+        self.base_seed = (
+            config.seed + (1 if split == "validation" else 0) + jax.process_index()
+        )
+        random.seed(self.base_seed)
         self.iterator = SyntheticGenerator(
-            self.base_seed, token_batch_params.len, token_batch_params.batch
+            token_batch_params.len, token_batch_params.batch
         )
         self.batch_size = token_batch_params.batch
         self.max_seq_len = token_batch_params.len
@@ -474,7 +477,6 @@ class SyntheticDataLoader:
         self.sharding = shardtypes.make_shardings(TokenBatch).targets
 
     def load(self, step: int):
-        random.seed(self.base_seed + step)
 
         shape = (self.batch_size, self.max_seq_len)
         tokens, comment_starts, comment_ends, loss_masks = next(self.iterator)

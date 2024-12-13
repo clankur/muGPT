@@ -3,22 +3,22 @@ defaults:
 - synthetic_base
 - _self_
 
-num_hosts: 1
+num_hosts: 4
 
 mesh:
-  d: 1 
+  d: 16
   t: 1
 
 training:
   warmup_steps: 900
-  steps:        9000
-  steps_for_lr: 9000
-  learning_rate: 3.0e-3 
+  steps:        9000 
+  steps_for_lr: 9000 
+  learning_rate: 1.5e-3
   tokens:
-    batch: 64 
-    len: 512
+    batch: 32
   use_grad_clip: true
-  use_gpu: true
+  use_gpu: false 
+  use_checkpoint: false 
 
 model:
   d_model: 256
@@ -26,8 +26,8 @@ model:
   n_kv: 16 
   d_head: 64 
   d_ff: 1024 
-  vocab: 49 
   layers: 8
+  vocab: 49 
 
   base:
     d_model: 256 
@@ -38,29 +38,11 @@ model:
 
   rope_max_timescale: 10000
 
-  # parameters for mixattention
-  window_size: 16 
-  n_kv_reuses: 2
-  shared_kv_idx:
-    - 0
-    - 1 
-    - 1
-    - 2
-    - 2
-    - 0
-    - 3
-    - 3
-  sa_layers:
-    - 0 
-    - 5 
-
-  # parameters for mup
   a_attn: 1.
   a_output: 1.
   zero_queries: true
   zero_unembed: true
 
-  # parameters for exp scaling
   parameterization: "sp" 
   fully_aligned: false
   gamma_embed: 1. 
@@ -68,3 +50,8 @@ model:
   gamma_unembed: 1.
   
 checkpoint_interval: 9200
+
+paths:
+  # root_working_dir can also be a path on a local filesystem
+  root_working_dir: "/tmp"
+

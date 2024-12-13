@@ -417,11 +417,8 @@ class Model:
                 logits,
             )
 
-            jax.debug.print("logits={logits}", logits=logits.shape)
-
             probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
 
-            jax.debug.print("probs={probs}", probs=probs.shape)
             attn_out = shardops.einsum_unreduced(
                 "B/d Qlen Klen Q K/t, B/d Klen K/t D -> B/d Qlen Q K/t D", probs, v
             )
@@ -431,8 +428,6 @@ class Model:
             )
             attn_out = shardops.psum_scatter("B/d Qlen M -> B/d Qlen M/t", attn_out)
             x = save_for_backward(x + attn_out)
-
-            jax.debug.print("x={x}", x=x.shape)
 
             # Pre-FFN RMSNorm
             ln2 = save_for_backward(shardops.all_gather("M/t/d -> M", jnp.float32(ln2)))
@@ -597,37 +592,43 @@ class Cope:
         gates = jax.nn.sigmoid(logits)
 
         positions = jnp.flip(jnp.cumsum(jnp.flip(gates, axis=-1), axis=-1), axis=-1)
-        positions = jnp.clip(positions, amin=0, a_max=self.n_pos_max - 1)
+        positions = jnp.clip(positions, a_min=0, a_max=self.n_pos_max - 1)
 
         pos_floor = jnp.floor(positions).astype(jnp.int32)
         pos_ceil = jnp.ceil(positions).astype(jnp.int32)
+        # B/d Qlen Klen Q K/t
 
+        one_hot_pos_ceil = jax.nn.one_hot(pos_ceil, self.n_pos_max)
+        one_hot_pos_floor = jax.nn.one_hot(pos_floor, self.n_pos_max)
+        # B/d Qlen Klen Q K/t n_pos_max
+
+        # TODO: Should I gather query or scatter pos_emb?
+        pos_emb = shardops.psum_scatter(
+            "Q K D n_pos_max -> Q K/t D n_pos_max", self.pos_emb
+        )
         z_p = shardops.einsum_unreduced(
             "B/d Qlen Q K/t D, Q K/t D n_pos_max -> B/d Qlen Q K/t n_pos_max",
             query,
-            self.pos_emb,
+            pos_emb,
             preferred_element_type=jnp.float32,
         )
 
-        # TODO: convert this to onehot encoding
-        z_p_ceil = shardops.index_unreduced(
-            "B/d Qlen Q K/t [n_pos_max], B/d Qlen Klen Q K/t -> B/d Qlen Klen Q K/t",
+        z_p_ceil = shardops.einsum_unreduced(
+            "B/d Qlen Q K/t n_pos_max, B/d Qlen Klen Q K/t n_pos_max -> B/d Qlen Klen Q K/t",
             z_p,
-            pos_ceil,
+            one_hot_pos_ceil,
         )
-        z_p_floor = shardops.index_unreduced(
-            "B/d Qlen Q K/t [n_pos_max], B/d Qlen Klen Q K/t -> B/d Qlen Klen Q K/t",
+        z_p_floor = shardops.einsum_unreduced(
+            "B/d Qlen Q K/t n_pos_max, B/d Qlen Klen Q K/t n_pos_max -> B/d Qlen Klen Q K/t",
             z_p,
-            pos_floor,
+            one_hot_pos_floor,
         )
 
         # Interpolation factor
         w = positions - pos_floor
+        out = w * z_p_ceil + (1 - w) * z_p_floor
 
-        out2 = w * z_p_ceil + (1 - w) * z_p_floor
-        # jax.debug.print("out2={out2}", out2=out2.shape)
-        # logits = logits + out2
-        return logits + out2
+        return logits + out
 
 
 @pytree_dataclass

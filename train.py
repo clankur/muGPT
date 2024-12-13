@@ -409,10 +409,17 @@ class Model:
                 preferred_element_type=jnp.float32,
             )
             logits = jnp.where(causal_mask, logits, -1e10)
-            if h.apply_cope:
-                logits += cope.apply(q, logits)
+            logits = jax.lax.select(
+                h.apply_cope,
+                cope.apply(q, logits),
+                logits,
+            )
+
+            jax.debug.print("logits={logits}", logits=logits.shape)
 
             probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
+
+            jax.debug.print("probs={probs}", probs=probs.shape)
             attn_out = shardops.einsum_unreduced(
                 "B/d Qlen Klen Q K/t, B/d Klen K/t D -> B/d Qlen Q K/t D", probs, v
             )
@@ -422,6 +429,8 @@ class Model:
             )
             attn_out = shardops.psum_scatter("B/d Qlen M -> B/d Qlen M/t", attn_out)
             x = save_for_backward(x + attn_out)
+
+            jax.debug.print("x={x}", x=x.shape)
 
             # Pre-FFN RMSNorm
             ln2 = save_for_backward(shardops.all_gather("M/t/d -> M", jnp.float32(ln2)))
@@ -568,14 +577,17 @@ class Model:
 
 @pytree_dataclass
 class Cope:
-    pos_emb: f32["max_len d_head"]
-    n_max: int
+    pos_emb: f32["n_q_per_kv n_kv/t d_head n_pos_max"]
+    n_pos_max: int
 
     @staticmethod
     def create(hparams: Hparams) -> "Cope":
-        n_max = hparams.cope_n_pos_max
-        pos_emb = jnp.zeros((n_max, hparams.d_head), dtype=jnp.float32)
-        return Cope(pos_emb=pos_emb, n_max=n_max)
+        n_pos_max = hparams.cope_n_pos_max
+        pos_emb = jnp.zeros(
+            (hparams.n_q_per_kv, hparams.n_kv, hparams.d_head, n_pos_max),
+            dtype=jnp.float32,
+        )
+        return Cope(pos_emb=pos_emb, n_pos_max=n_pos_max)
 
     def apply(
         self, query: f32["B/d Qlen Q K/t D"], logits: f32["B/d Qlen Klen Q K/t"]
@@ -583,32 +595,37 @@ class Cope:
         gates = jax.nn.sigmoid(logits)
 
         positions = jnp.flip(jnp.cumsum(jnp.flip(gates, axis=-1), axis=-1), axis=-1)
-        positions = jnp.clip(positions, a_max=self.n_max - 1)
+        positions = jnp.clip(positions, amin=0, a_max=self.n_pos_max - 1)
 
         pos_floor = jnp.floor(positions).astype(jnp.int32)
         pos_ceil = jnp.ceil(positions).astype(jnp.int32)
 
         z_p = shardops.einsum_unreduced(
-            "B/d Qlen Q K/t D, n_max D -> B/d Qlen Q K/t n_max",
+            "B/d Qlen Q K/t D, Q K/t D n_pos_max -> B/d Qlen Q K/t n_pos_max",
             query,
             self.pos_emb,
             preferred_element_type=jnp.float32,
         )
 
+        # TODO: convert this to onehot encoding
         z_p_ceil = shardops.index_unreduced(
-            "B/d Qlen Q K/t [n_max], B/d Qlen Klen Q K/t -> B/d Qlen Klen Q K/t",
+            "B/d Qlen Q K/t [n_pos_max], B/d Qlen Klen Q K/t -> B/d Qlen Klen Q K/t",
             z_p,
             pos_ceil,
         )
         z_p_floor = shardops.index_unreduced(
-            "B/d Qlen Q K/t [n_max], B/d Qlen Klen Q K/t -> B/d Qlen Klen Q K/t",
+            "B/d Qlen Q K/t [n_pos_max], B/d Qlen Klen Q K/t -> B/d Qlen Klen Q K/t",
             z_p,
             pos_floor,
         )
 
         # Interpolation factor
         w = positions - pos_floor
-        return w * z_p_ceil + (1 - w) * z_p_floor
+
+        out2 = w * z_p_ceil + (1 - w) * z_p_floor
+        # jax.debug.print("out2={out2}", out2=out2.shape)
+        # logits = logits + out2
+        return logits + out2
 
 
 @pytree_dataclass

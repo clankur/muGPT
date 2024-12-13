@@ -10,12 +10,12 @@ mesh:
   t: 1
 
 training:
-  warmup_steps: 900
-  steps:        9000 
-  steps_for_lr: 9000 
-  learning_rate: 1.5e-3
+  warmup_steps: 290
+  steps:        2900 
+  steps_for_lr: 2900 
+  learning_rate: 4.2e-3
   tokens:
-    batch: 32
+    batch: 256 
   use_grad_clip: true
   use_gpu: false 
   use_checkpoint: false 
@@ -37,6 +37,21 @@ model:
     d_ff: 1024 
 
   rope_max_timescale: 10000
+
+  window_size: 32 
+  n_kv_reuses: 2
+  shared_kv_idx:
+    - 0
+    - 1 
+    - 1
+    - 2
+    - 2
+    - 0
+    - 3
+    - 3
+  sa_layers:
+    - 0 
+    - 5 
 
   a_attn: 1.
   a_output: 1.

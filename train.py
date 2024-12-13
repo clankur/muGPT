@@ -343,7 +343,9 @@ class Model:
         embed = embed_mult * shardops.all_gather(
             "V/t M/d -> V/t M", jnp.bfloat16(self.embed)
         )
-        x = shardops.index_unreduced("[V/t] M, B/d L -> B/d L M", embed, ids)
+        one_hot_ids = jax.nn.one_hot(ids, self.embed.shape[0])
+        x = shardops.einsum_unreduced("B/d L V/t, V/t M -> B/d L M", one_hot_ids, embed)
+
         x = shardops.psum_scatter("B/d L M -> B/d L M/t", x)
 
         L = ids.shape[1]

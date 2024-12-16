@@ -572,7 +572,10 @@ class ResConvModel:
     kernel: f32["layers groups d_hidden in_channels kernel_size"]
     linear: f32["layers d_hidden d_model"]
     ln: f32["layers d_model/t/d"]
+    embed: f32["vocab/t d_model/d"]
+    unembed: f32["vocab/t d_model/d"]
 
+    @staticmethod
     def init(hparams: ResConvHparams, rng: PRNGKey) -> "ResConvModel":
         assert hparams.d_model % hparams.groups == 0
         in_channels, out_channels = (
@@ -582,6 +585,20 @@ class ResConvModel:
         truncated_normal_stddev = 0.87962566103423978
 
         embed_scale = 1.0 / (math.sqrt(hparams.d_model) * truncated_normal_stddev)
+        embed = embed_scale * jax.random.normal(
+            jax_extra.fold_in_str(rng, "embed"),
+            (hparams.vocab, hparams.d_model),
+            dtype=jnp.float32,
+        )
+        unembed_scale = 1.0 / (math.sqrt(hparams.d_model) * truncated_normal_stddev)
+        unembed = unembed_scale * jax.random.truncated_normal(
+            jax_extra.fold_in_str(rng, "unembed"),
+            -2,
+            2,
+            (hparams.vocab, hparams.d_model),
+            dtype=jnp.float32,
+        )
+
         kernel_scale = 1.0
         kernel_shape = (
             hparams.layers,
@@ -608,10 +625,10 @@ class ResConvModel:
     def forward_pass(
         self, hparams: ResConvHparams, ids: f32[b"B/d L"]
     ) -> f32[b"B/d L M/t"]:
-        B, L, M = ids.shape
-        # embed ids
-
-        ids = einops.rearrange(ids, "B L (g fan_in) -> g fan_in B L", g=hparams.groups)
+        embed = shardops.all_gather("V/t M/d -> V/t M", jnp.bfloat16(self.embed))
+        one_hot_ids = jax.nn.one_hot(ids, self.embed.shape[0])
+        x = shardops.einsum_unreduced("B/d L V/t, V/t M -> B/d L M", one_hot_ids, embed)
+        x = einops.rearrange(x, "B L (g fan_in) -> g fan_in B L", g=hparams.groups)
 
         @explicit_activation_checkpointing
         @typechecked
@@ -626,7 +643,7 @@ class ResConvModel:
                     k,
                     window_strides=(1,),
                     padding="SAME",
-                    dimension_numbers=("NCH", "OIH", "NCH"),
+                    dimension_numbers=("CNH", "OIH", "NCH"),
                 )
             )(x, kernel)
 
@@ -643,7 +660,14 @@ class ResConvModel:
             (self.kernel, self.linear, self.ln),
             length=hparams.layers,
         )
-        return x
+        unembed = shardops.all_gather("V/t M/d -> V/t M", jnp.bfloat16(self.unembed))
+        logits = shardops.einsum_unreduced(
+            "B/d L M, V/t M -> B/d L V/t",
+            x,
+            unembed,
+            preferred_element_type=jnp.float32,
+        )
+        return logits
 
 
 @pytree_dataclass

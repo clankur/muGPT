@@ -556,6 +556,96 @@ class Model:
         )
 
 
+@dataclass(frozen=True)
+class ResConvHparams:
+    d_model: int
+    d_hidden: int
+    n_q_per_kv: int
+    kernel_size: int
+    groups: int
+    dropout: float
+    layers: int
+
+
+@pytree_dataclass
+class ResConvModel:
+    kernel: f32["layers groups d_hidden in_channels kernel_size"]
+    linear: f32["layers d_hidden d_model"]
+    ln: f32["layers d_model/t/d"]
+
+    def init(hparams: ResConvHparams, rng: PRNGKey) -> "ResConvModel":
+        assert hparams.d_model % hparams.groups == 0
+        in_channels, out_channels = (
+            hparams.d_model // hparams.groups,
+            hparams.d_hidden // hparams.groups,
+        )
+        truncated_normal_stddev = 0.87962566103423978
+
+        embed_scale = 1.0 / (math.sqrt(hparams.d_model) * truncated_normal_stddev)
+        kernel_scale = 1.0
+        kernel_shape = (
+            hparams.layers,
+            hparams.groups,
+            out_channels,
+            in_channels,
+            hparams.kernel_size,
+        )
+
+        kernel = kernel_scale * jax.random.normal(
+            rng,
+            kernel_shape,
+        )
+        linear_shape = (hparams.layers, hparams.d_hidden, hparams.d_model)
+        linear_scale = 1.0 / (math.sqrt(hparams.d_hidden) * truncated_normal_stddev)
+        linear = linear_scale * jax.random.normal(
+            rng,
+            linear_shape,
+        )
+        ln = jnp.ones((hparams.layers, hparams.d_model), dtype=jnp.float32)
+
+        return ResConvModel(kernel=kernel, linear=linear, ln=ln)
+
+    def forward_pass(
+        self, hparams: ResConvHparams, ids: f32[b"B/d L"]
+    ) -> f32[b"B/d L M/t"]:
+        B, L, M = ids.shape
+        # embed ids
+
+        ids = einops.rearrange(ids, "B L (g fan_in) -> g fan_in B L", g=hparams.groups)
+
+        @explicit_activation_checkpointing
+        @typechecked
+        def loop_body(
+            x: bf16[b"g fan_in B/d L/t"], layer_weights: Any
+        ) -> Tuple[bf16[b"g fan_in B/d L/t"], Tuple[()]]:
+            kernel, linear, ln = layer_weights
+
+            out = jax.vmap(
+                lambda x, k: jax.lax.conv_general_dilated(
+                    x,
+                    k,
+                    window_strides=(1,),
+                    padding="SAME",
+                    dimension_numbers=("NCH", "OIH", "NCH"),
+                )
+            )(x, kernel)
+
+            out = jax.nn.relu(out)
+            out = layer_norm(out) * ln
+            out = jax.lax.dropout(out, rate=hparams.dropout)
+            out = shardops.einsum_unreduced("B/d L/t F, F M -> B/d L/t M", out, linear)
+
+            return x + out, ()
+
+        x, () = jax.lax.scan(
+            loop_body,
+            ids,
+            (self.kernel, self.linear, self.ln),
+            length=hparams.layers,
+        )
+        return x
+
+
 @pytree_dataclass
 class RopeTable:
     sin: f32["len d_head2"]
@@ -591,6 +681,12 @@ def rms_norm(x: bf16[b"batch/d len M"]) -> bf16[b"batch/d len M"]:
         jnp.mean(jax.lax.square(jnp.float32(x)), axis=-1, keepdims=True)
     )
     return jnp.bfloat16(x * jax.lax.rsqrt(mean2 + 1e-6))
+
+
+def layer_norm(x: bf16[b"batch/d len M"]) -> bf16[b"batch/d len M"]:
+    mean = jnp.mean(x, axis=-1, keepdims=True)
+    variance = jnp.var(x, axis=-1, keepdims=True)
+    return (x - mean) / jnp.sqrt(variance + 1e-6)
 
 
 @pytree_dataclass

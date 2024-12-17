@@ -322,7 +322,9 @@ def make_partition_specs(cls):
     args = typing.get_args(cls)
     if origin is Union:
         # Find the non-None type in the Union
+        print(f"{args=}")
         array_type = next((arg for arg in args if arg is not type(None)), None)
+        print(f"{array_type=}")
         if array_type is None:
             raise ValueError(f"Union type {cls} must have at least one non-None type")
         return make_partition_specs(array_type)

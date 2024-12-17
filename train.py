@@ -905,28 +905,38 @@ def training_step(
         global_norm_square = jax.lax.psum(global_norm_square, ("d", "t"))
         global_norm = jnp.sqrt(global_norm_square)
 
-        base = h.base
+        if isinstance(h, Hparams):
+            base = h.base
 
-        p = get_parameterization(h.parameterization)
-        target_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
-        base_head_dim = base.n_q_per_kv * base.n_kv * base.d_head
+            p = get_parameterization(h.parameterization)
+            target_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
+            base_head_dim = base.n_q_per_kv * base.n_kv * base.d_head
 
-        embed_lr_scale = h.gamma_embed * (h.d_model / base.d_model) ** -p.embed_lr
-        unembed_lr_scale = h.gamma_unembed * (h.d_model / base.d_model) ** -p.unembed_lr
-
-        lr_scales = Model(
-            embed=embed_lr_scale,
-            unembed=unembed_lr_scale,
-            ln1=1.0,
-            ln2=1.0,
-            w_q=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
-            w_kv=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
-            w_o=h.gamma_hidden * (target_head_dim / base_head_dim) ** -p.hidden_lr,
-            w_gate=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
-            w_up=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
-            w_down=h.gamma_hidden * (h.d_ff / base.d_ff) ** -p.hidden_lr,
-            final_layer_norm=1.0,
-        )
+            embed_lr_scale = h.gamma_embed * (h.d_model / base.d_model) ** -p.embed_lr
+            unembed_lr_scale = (
+                h.gamma_unembed * (h.d_model / base.d_model) ** -p.unembed_lr
+            )
+            lr_scales = Model(
+                embed=embed_lr_scale,
+                unembed=unembed_lr_scale,
+                ln1=1.0,
+                ln2=1.0,
+                w_q=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
+                w_kv=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
+                w_o=h.gamma_hidden * (target_head_dim / base_head_dim) ** -p.hidden_lr,
+                w_gate=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
+                w_up=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
+                w_down=h.gamma_hidden * (h.d_ff / base.d_ff) ** -p.hidden_lr,
+                final_layer_norm=1.0,
+            )
+        elif isinstance(h, ResConvHparams):
+            lr_scales = ResConvModel(
+                embed=1.0,
+                unembed=1.0,
+                ln=1.0,
+                kernel=1.0,
+                linear=1.0,
+            )
 
         if hparams.use_grad_clip:
             clip_value = 1.0

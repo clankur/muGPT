@@ -13,7 +13,7 @@ training:
   warmup_steps: 240
   steps:        2400
   steps_for_lr: 2400
-  learning_rate: 7.3e-3
+  learning_rate: 1.35e-2
   tokens:
     batch: 256
   use_grad_clip: true

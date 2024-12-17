@@ -1,0 +1,44 @@
+# Command to run on your CPU:
+#   XLA_FLAGS=--xla_force_host_platform_device_count=8 python -m train --config-name=local_test_synthetic +paths.model_name=synthetic_000
+
+defaults:
+- base
+- _self_
+
+training:
+  warmup_steps: 5
+  steps:        50
+  steps_for_lr: 50
+  tokens:
+    batch: 64
+    len: 64
+  use_grad_clip: true
+  use_gpu: false
+  use_checkpoint: false 
+
+res_conv_model:
+  d_model: 512
+  d_hidden: 384
+  kernel_size: 5
+  groups: 1
+  dropout: 0.0
+  layers: 2
+  vocab: 32768
+
+paths:
+  root_working_dir: '/tmp'
+
+checkpoint_interval: 10
+num_hosts: 1
+
+mesh:
+  d: 4
+  t: 2
+
+flat_tokens:
+  filespec: 'synthetic_dataset.zarr'
+  streams: 1
+  read_blocks_per_shuffle_buffer: 128
+  sequences_per_read_block: 1024
+  seed: 0
+  sequence_packing: true

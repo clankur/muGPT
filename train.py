@@ -560,11 +560,11 @@ class Model:
 class ResConvHparams:
     d_model: int
     d_hidden: int
-    n_q_per_kv: int
     kernel_size: int
     groups: int
     dropout: float
     layers: int
+    vocab: int
 
 
 @pytree_dataclass
@@ -619,8 +619,11 @@ class ResConvModel:
             linear_shape,
         )
         ln = jnp.ones((hparams.layers, hparams.d_model), dtype=jnp.float32)
-
-        return ResConvModel(kernel=kernel, linear=linear, ln=ln)
+        arrays = ResConvModel(
+            kernel=kernel, linear=linear, ln=ln, embed=embed, unembed=unembed
+        )
+        shardings = make_shardings(ResConvModel)
+        return jax.tree.map(lax.with_sharding_constraint, arrays, shardings)
 
     def forward_pass(
         self, hparams: ResConvHparams, ids: f32[b"B/d L"]
@@ -668,6 +671,92 @@ class ResConvModel:
             preferred_element_type=jnp.float32,
         )
         return logits
+
+    @typechecked
+    def loss(
+        self, h: ResConvHparams, batch: TokenBatch
+    ) -> Tuple[f32[b""], SyntheticMetrics]:
+        # Given sequence-packed targets:
+        #   [[1, 2], [3, 4, 5], [6, 7, 8, 9]]
+        # we want inputs:
+        #   [[0, 1], [0, 3, 4], [0, 6, 7, 8]]
+        # which we get by shifting the targets right by 1 and
+        # masking sequence-start tokens to 0.
+        inputs = jnp.pad(batch.targets[:, :-1], pad_width=((0, 0), (1, 0)))
+        is_seq_start: bool_[b"batch/d len"] = batch.is_seq_start
+        inputs: u32[b"batch/d len"] = jnp.where(is_seq_start, 0, inputs)
+
+        logits = self.forward_pass(h, inputs, is_seq_start)
+        max_logits = lax.pmax(
+            jnp.max(lax.stop_gradient(logits), axis=-1, keepdims=True), "t"
+        )
+        logits = logits - max_logits
+        sum_logits = lax.psum(jnp.sum(jnp.exp(logits), axis=-1, keepdims=True), "t")
+        logsumexp = jnp.log(sum_logits)
+        logprobs: f32[b"batch/d len V/t"] = logits - logsumexp
+        logprobs_at_targets = shardops.index_unreduced(
+            "batch/d len [V/t], batch/d len -> batch/d len", logprobs, batch.targets
+        )
+        logprobs_at_targets = shardops.psum_scatter(
+            "batch/d len -> batch/d len/t", logprobs_at_targets
+        )
+        if batch.loss_masks is not None:
+            logprobs_at_targets = jnp.where(batch.loss_masks, logprobs_at_targets, 0)
+        tokens_in_global_batch = logprobs_at_targets.size * jax.lax.psum(1, ("d", "t"))
+
+        probs_at_targets = jnp.exp(logprobs_at_targets)
+
+        batch_size, length = probs_at_targets.shape
+
+        if batch.comment_starts is not None and batch.comment_ends is not None:
+            comment_starts: u32[b"batch/d n_print"] = batch.comment_starts
+            comment_ends: u32[b"batch/d n_print"] = batch.comment_ends
+
+            batch_indices = jnp.arange(batch_size)[:, jnp.newaxis]  # (batch, 1)
+            start_char_probs = probs_at_targets[batch_indices, comment_starts]
+            avg_start_char_probs: f32[b""] = jnp.mean(start_char_probs)
+            last_char_probs = probs_at_targets[batch_indices, comment_ends - 1]
+            avg_last_char_probs: f32[b""] = jnp.mean(last_char_probs)
+
+            comment_mask = jax.vmap(
+                lambda starts_row, ends_row: jax.vmap(
+                    lambda start, end: (jnp.arange(length) >= start)
+                    & (jnp.arange(length) < end)
+                )(starts_row, ends_row)
+            )(comment_starts, comment_ends)
+
+            probs_at_targets = probs_at_targets[:, jnp.newaxis, :]
+
+            p_answer = jnp.prod(jnp.where(comment_mask, probs_at_targets, 1), axis=-1)
+
+            # average confidence for each prints in sequence
+            avg_p_answer: f32[b""] = jnp.mean(p_answer)
+
+            total_tokens = jnp.sum(comment_ends - comment_starts + 1)
+            comment_probs = jnp.where(comment_mask, probs_at_targets, 0)
+            average_char_confidence = jnp.sum(comment_probs) / total_tokens
+            max_char_confidence = jnp.max(comment_probs)
+
+            synth_metrics = SyntheticMetrics(
+                avg_confidence=avg_p_answer,
+                max_char_confidence=max_char_confidence,
+                avg_char_confidence=average_char_confidence,
+                avg_start_char_confidence=avg_start_char_probs,
+                avg_final_char_confidence=avg_last_char_probs,
+            )
+        else:
+            synth_metrics = SyntheticMetrics(
+                avg_confidence=jnp.float32(0.0),
+                max_char_confidence=jnp.float32(0.0),
+                avg_char_confidence=jnp.float32(0.0),
+                avg_start_char_confidence=jnp.float32(0.0),
+                avg_final_char_confidence=jnp.float32(0.0),
+            )
+
+        return (
+            -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch),
+            synth_metrics,
+        )
 
 
 @pytree_dataclass
@@ -743,13 +832,18 @@ class TrainingHparams:
 
 @pytree_dataclass
 class State:
-    weights: Model
-    adam_mu: Model
-    adam_nu: Model
+    weights: Union[Model, ResConvModel]
+    adam_mu: Union[Model, ResConvModel]
+    adam_nu: Union[Model, ResConvModel]
 
     @staticmethod
-    def init(hparams: Hparams, rng: PRNGKey) -> "State":
-        weights = Model.init(hparams, rng)
+    def init(hparams: Union[Hparams, ResConvHparams], rng: PRNGKey) -> "State":
+        if isinstance(hparams, Hparams):
+            weights = Model.init(hparams, rng)
+        elif isinstance(hparams, ResConvHparams):
+            weights = ResConvModel.init(hparams, rng)
+        else:
+            raise ValueError(f"Unsupported hparams type: {type(hparams)}")
         adam_mu = jax.tree.map(lambda p: p * 0.0, weights)
         adam_nu = jax.tree.map(lambda p: p * 0.0, weights)
         return State(weights=weights, adam_mu=adam_mu, adam_nu=adam_nu)
@@ -760,7 +854,7 @@ class State:
 def training_step(
     state: State,
     step: u32[b""],
-    h: Hparams,
+    h: Union[Hparams, ResConvHparams],
     hparams: TrainingHparams,
     batch: TokenBatch,
 ) -> Tuple[Any, Metrics, SyntheticMetrics]:
@@ -908,34 +1002,37 @@ class MeshConfig:
 
 @dataclass(frozen=True)
 class Config:
-    model: Hparams
     training: TrainingHparams
     paths: Paths
     num_hosts: int
     checkpoint_interval: int
     mesh: MeshConfig
     io: training_io.IOConfig
+    model: Optional[Hparams] = None
+    res_conv_model: Optional[ResConvHparams] = None
     flat_tokens: Optional[FlatTokensParams] = None
     hf_dataset: Optional[HuggingFaceDataParams] = None
     synthetic_dataset: Optional[SyntheticDataParams] = None
 
     def __post_init__(self):
         assert (
+            self.model is not None or self.res_conv_model is not None
+        ), "Must provide either model or res_conv_model."
+        assert (
             self.flat_tokens is not None
             or self.hf_dataset is not None
             or self.synthetic_dataset is not None
         ), "Must provide either flat_tokens or hf_dataset or synthetic_dataset."
-        assert not (
-            self.flat_tokens is not None
-            and self.hf_dataset is not None
-            and self.synthetic_dataset is not None
-        ), "Should not specify both flat_tokens and hf_dataset and synthetic_dataset."
 
     @cached_property
     def training_data(
         self,
     ) -> Union[FlatTokensParams, HuggingFaceDataParams, SyntheticDataParams]:
         return self.flat_tokens or self.hf_dataset or self.synthetic_dataset
+
+    @cached_property
+    def model_data(self) -> Union[Model, ResConvModel]:
+        return self.model or self.res_conv_model
 
 
 def main_contained(config, logger):
@@ -954,8 +1051,8 @@ def main_contained(config, logger):
 
         loader = get_loader("train", config.training_data, config.training.tokens)
         assert (
-            config.model.vocab > loader.max_token_id
-        ), f"{config.model.vocab} vs {loader.max_token_id}"
+            config.model_data.vocab > loader.max_token_id
+        ), f"{config.model_data.vocab} vs {loader.max_token_id}"
         config_name = hydra.core.hydra_config.HydraConfig.get()["job"]["config_name"]
         model_name = (
             config.paths.model_name
@@ -965,7 +1062,7 @@ def main_contained(config, logger):
         model_dir = os.path.join(config.paths.root_working_dir, model_name)
         print(model_name)
 
-        state = jax.jit(partial(State.init, config.model))(
+        state = jax.jit(partial(State.init, config.model_data))(
             fold_in_str(root_rng, "init")
         )
         if config.training.use_checkpoint:
@@ -978,7 +1075,7 @@ def main_contained(config, logger):
         # Explicitly compile training step, to record XLA HLO graph.
         # See https://bnikolic.co.uk/blog/python/jax/2022/02/22/jax-outputgraph-rev
         c_training_step = training_step.lower(
-            state, jnp.uint32(0), config.model, config.training, loader.load(0)
+            state, jnp.uint32(0), config.model_data, config.training, loader.load(0)
         ).compile()
         date = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
         # training_io.save_hlo_svg(os.path.join(model_dir, f'training_step_optimized_hlo_{date}.svg'), c_training_step)
@@ -1027,7 +1124,7 @@ def main_contained(config, logger):
                 c_training_step = training_step.lower(
                     state,
                     jnp.uint32(0),
-                    config.model,
+                    config.model_data,
                     config.training,
                     loader.load(step),
                 ).compile()

@@ -295,7 +295,7 @@ class Model:
             out = layer_norm(out) * ln
             out = jax.lax.dropout(out, rate=h.dropout)
             out = shardops.einsum_unreduced(
-                "g F B/d L/t, F M -> g M B/d L/t", out, linear
+                "g fan_out B/d L/t, fan_out fan_in -> g fan_in B/d L/t", out, linear
             )
 
             return jnp.bfloat16(x + out), ()

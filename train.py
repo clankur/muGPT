@@ -631,21 +631,28 @@ class Cope:
         return logits + out
 
 
-def get_alibi_bias(logits: f32["B/d Qlen Klen Q K/t"]) -> f32["1 Qlen Klen 1 K/t"]:
-    _, Qlen, _, _, n_kv = logits.shape
-    start = 2.0 ** (-(2.0 ** -(jnp.log2(n_kv) - 3)))
-    # TODO: change this to a class, and make it a parameter
-    slopes = start * (start ** jnp.arange(0, n_kv))
-    slopes = einops.rearrange(slopes, "K -> 1 1 1 K")
+@pytree_dataclass
+class Alibi:
+    slopes: f32["K/t"]
 
-    position_bias = jnp.arange(Qlen)[None, :] - jnp.arange(Qlen)[:, None]
-    position_bias = einops.rearrange(position_bias, "Qlen Klen -> Qlen Klen 1 1")
+    def create(hparams: Hparams) -> "Alibi":
+        n_kv = hparams.n_kv
+        start = 2.0 ** (-(2.0 ** -(jnp.log2(n_kv) - 3)))
+        slopes = start * (start ** jnp.arange(0, n_kv))
+        slopes = shardops.psum_scatter("K -> K/t", slopes)
+        return Alibi(slopes=slopes)
 
-    bias: f32["1 Qlen Klen 1 K/t"] = einops.rearrange(
-        position_bias * slopes, "Qlen Klen 1 K -> 1 Qlen Klen 1 K"
-    )
+    def get_bias(self, logits: f32["B/d Qlen Klen Q K/t"]) -> f32["1 Qlen Klen 1 K/t"]:
+        Qlen = logits.shape[1]
+        slopes = einops.rearrange(self.slopes, "K -> 1 1 1 K")
 
-    return bias
+        position_bias = jnp.arange(Qlen)[None, :] - jnp.arange(Qlen)[:, None]
+        position_bias = einops.rearrange(position_bias, "Qlen Klen -> Qlen Klen 1 1")
+
+        bias: f32["1 Qlen Klen 1 K/t"] = einops.rearrange(
+            position_bias * slopes, "Qlen Klen 1 K -> 1 Qlen Klen 1 K"
+        )
+        return bias
 
 
 @pytree_dataclass

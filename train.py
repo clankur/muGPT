@@ -639,6 +639,11 @@ class Config:
             or self.hf_dataset is not None
             or self.synthetic_dataset is not None
         ), "Must provide either flat_tokens or hf_dataset or synthetic_dataset."
+        assert not (
+            self.flat_tokens is not None
+            and self.hf_dataset is not None
+            and self.synthetic_dataset is not None
+        ), "Should not specify both flat_tokens and hf_dataset and synthetic_dataset."
 
     @cached_property
     def training_data(

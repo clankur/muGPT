@@ -326,8 +326,8 @@ class Model:
         is_seq_start: bool_[b"batch/d len"] = batch.is_seq_start
         inputs: u32[b"batch/d len"] = jnp.where(is_seq_start, 0, inputs)
 
-        logits = self.forward_pass(h, inputs, is_seq_start)
-        max_logits = lax.pmax(
+        logits: f32[b"batch/d len V/t"] = self.forward_pass(h, inputs, is_seq_start)
+        max_logits: f32[b"batch/d len 1"] = lax.pmax(
             jnp.max(lax.stop_gradient(logits), axis=-1, keepdims=True), "t"
         )
         logits = logits - max_logits
@@ -622,22 +622,18 @@ class MeshConfig:
 
 @dataclass(frozen=True)
 class Config:
+    model: Hparams
     training: TrainingHparams
     paths: Paths
     num_hosts: int
     checkpoint_interval: int
     mesh: MeshConfig
     io: training_io.IOConfig
-    model: Optional[Hparams] = None
-    res_conv_model: Optional[Hparams] = None
     flat_tokens: Optional[FlatTokensParams] = None
     hf_dataset: Optional[HuggingFaceDataParams] = None
     synthetic_dataset: Optional[SyntheticDataParams] = None
 
     def __post_init__(self):
-        assert (
-            self.model is not None or self.res_conv_model is not None
-        ), "Must provide either model or res_conv_model."
         assert (
             self.flat_tokens is not None
             or self.hf_dataset is not None

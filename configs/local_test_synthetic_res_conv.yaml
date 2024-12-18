@@ -16,7 +16,7 @@ training:
   use_gpu: false
   use_checkpoint: false 
 
-res_conv_model:
+model:
   d_model: 512
   d_hidden: 384
   kernel_size: 5

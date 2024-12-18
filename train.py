@@ -267,6 +267,7 @@ class Model:
         one_hot_ids = jax.nn.one_hot(ids, self.embed.shape[0])
         x = shardops.einsum_unreduced("B/d L V/t, V/t M -> B/d L M", one_hot_ids, embed)
         x = einops.rearrange(x, "B L (g fan_in) -> g fan_in B L", g=h.groups)
+        x = shardops.psum_scatter("g fan_in/t B/d L -> g fan_in/t B/d L", x)
 
         segment_ids = jnp.cumsum(is_seq_start, axis=1)
         # TODO: mask is not used, assess how we work it in if needed
@@ -277,23 +278,24 @@ class Model:
         @explicit_activation_checkpointing
         @typechecked
         def loop_body(
-            x: bf16[b"g fan_in B/d L/t"], layer_weights: Any
-        ) -> Tuple[bf16[b"g fan_in B/d L/t"], Tuple[()]]:
+            x: bf16[b"g fan_in/t B/d L"], layer_weights: Any
+        ) -> Tuple[bf16[b"g fan_in/t B/d L"], Tuple[()]]:
             kernel, linear, ln = layer_weights
-
             out = jax.vmap(
-                lambda x, k: jax.lax.conv_general_dilated(
-                    x,
+                lambda x_in, k: jax.lax.conv_general_dilated(
+                    jnp.float32(x_in),
                     k,
                     window_strides=(1,),
                     padding="SAME",
-                    dimension_numbers=("CNH", "OIH", "NCH"),
+                    dimension_numbers=(),
                 )
             )(x, kernel)
 
             out = jax.nn.relu(out)
             out = layer_norm(out) * ln
-            out = jax.lax.dropout(out, rate=h.dropout)
+            # out = jax.nn.dropout(out, rate=h.dropout)
+            print(out.shape)
+            print(linear.shape)
             out = shardops.einsum_unreduced(
                 "g fan_out B/d L/t, fan_out fan_in -> g fan_in B/d L/t", out, linear
             )

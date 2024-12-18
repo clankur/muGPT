@@ -76,6 +76,7 @@ class Hparams:
     cope_n_pos_max: int
     apply_cope: bool
     apply_rope: bool
+    apply_alibi: bool
 
     # parameters for mup
     a_attn: float
@@ -364,6 +365,9 @@ class Model:
         if h.apply_rope:
             rope_table = RopeTable.create(L, h)
 
+        if h.apply_alibi:
+            alibi = Alibi.create(h)
+
         if h.apply_cope:
             cope = Cope.create(h)
 
@@ -410,6 +414,10 @@ class Model:
                 k,
                 preferred_element_type=jnp.float32,
             )
+
+            if h.apply_alibi:
+                logits = alibi.apply(logits)
+
             logits = jnp.where(causal_mask, logits, -1e10)
             logits = jax.lax.select(
                 h.apply_cope,

@@ -28,6 +28,7 @@ model:
   cope_n_pos_max: 64
   apply_cope: true
   apply_rope: true
+  apply_alibi: true
 
   a_attn: 1
   a_output: 1

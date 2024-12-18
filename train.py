@@ -210,60 +210,68 @@ class Model:
     unembed: f32["vocab/t d_model/d"]
 
     @staticmethod
-    def init(hparams: Hparams, rng: PRNGKey) -> "Model":
-        assert hparams.d_model % hparams.groups == 0
+    def init(h: Hparams, rng: PRNGKey) -> "Model":
+        assert h.d_model % h.groups == 0
         in_channels, out_channels = (
-            hparams.d_model // hparams.groups,
-            hparams.d_hidden // hparams.groups,
+            h.d_model // h.groups,
+            h.d_hidden // h.groups,
         )
         truncated_normal_stddev = 0.87962566103423978
 
-        embed_scale = 1.0 / (math.sqrt(hparams.d_model) * truncated_normal_stddev)
+        embed_scale = 1.0 / (math.sqrt(h.d_model) * truncated_normal_stddev)
         embed = embed_scale * jax.random.normal(
             jax_extra.fold_in_str(rng, "embed"),
-            (hparams.vocab, hparams.d_model),
+            (h.vocab, h.d_model),
             dtype=jnp.float32,
         )
-        unembed_scale = 1.0 / (math.sqrt(hparams.d_model) * truncated_normal_stddev)
+        unembed_scale = 1.0 / (math.sqrt(h.d_model) * truncated_normal_stddev)
         unembed = unembed_scale * jax.random.truncated_normal(
             jax_extra.fold_in_str(rng, "unembed"),
             -2,
             2,
-            (hparams.vocab, hparams.d_model),
+            (h.vocab, h.d_model),
             dtype=jnp.float32,
         )
 
         kernel_scale = 1.0
         kernel_shape = (
-            hparams.layers,
-            hparams.groups,
+            h.layers,
+            h.groups,
             out_channels,
             in_channels,
-            hparams.kernel_size,
+            h.kernel_size,
         )
 
         kernel = kernel_scale * jax.random.normal(
             rng,
             kernel_shape,
         )
-        linear_shape = (hparams.layers, hparams.d_hidden, hparams.d_model)
-        linear_scale = 1.0 / (math.sqrt(hparams.d_hidden) * truncated_normal_stddev)
+        linear_shape = (h.layers, h.d_hidden, h.d_model)
+        linear_scale = 1.0 / (math.sqrt(h.d_hidden) * truncated_normal_stddev)
         linear = linear_scale * jax.random.normal(
             rng,
             linear_shape,
         )
-        ln = jnp.ones((hparams.layers, hparams.d_model), dtype=jnp.float32)
+        ln = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
         arrays = Model(
             kernel=kernel, linear=linear, ln=ln, embed=embed, unembed=unembed
         )
         shardings = make_shardings(Model)
         return jax.tree.map(lax.with_sharding_constraint, arrays, shardings)
 
-    def forward_pass(self, hparams: Hparams, ids: f32[b"B/d L"]) -> f32[b"B/d L M/t"]:
+    def forward_pass(
+        self, hparams: Hparams, ids: f32[b"B/d L"], is_seq_start: bool_[b"batch/d len"]
+    ) -> f32[b"B/d L M/t"]:
         embed = shardops.all_gather("V/t M/d -> V/t M", jnp.bfloat16(self.embed))
         one_hot_ids = jax.nn.one_hot(ids, self.embed.shape[0])
         x = shardops.einsum_unreduced("B/d L V/t, V/t M -> B/d L M", one_hot_ids, embed)
         x = einops.rearrange(x, "B L (g fan_in) -> g fan_in B L", g=hparams.groups)
+
+        segment_ids = jnp.cumsum(is_seq_start, axis=1)
+        # TODO: mask is not used, assess how we work it in if needed
+        segment_mask: bool_[b"B/d L L"] = (
+            segment_ids[:, :, jnp.newaxis] == segment_ids[:, jnp.newaxis, :]
+        )
 
         @explicit_activation_checkpointing
         @typechecked
@@ -285,7 +293,9 @@ class Model:
             out = jax.nn.relu(out)
             out = layer_norm(out) * ln
             out = jax.lax.dropout(out, rate=hparams.dropout)
-            out = shardops.einsum_unreduced("B/d L/t F, F M -> B/d L/t M", out, linear)
+            out = shardops.einsum_unreduced(
+                "g F B/d L/t, F M -> g M B/d L/t", out, linear
+            )
 
             return x + out, ()
 
@@ -305,9 +315,7 @@ class Model:
         return logits
 
     @typechecked
-    def loss(
-        self, h: Hparams, batch: TokenBatch, is_seq_start: bool_[b"batch/d len"]
-    ) -> Tuple[f32[b""], SyntheticMetrics]:
+    def loss(self, h: Hparams, batch: TokenBatch) -> Tuple[f32[b""], SyntheticMetrics]:
         # Given sequence-packed targets:
         #   [[1, 2], [3, 4, 5], [6, 7, 8, 9]]
         # we want inputs:

@@ -261,7 +261,7 @@ class Model:
         return jax.tree.map(lax.with_sharding_constraint, arrays, shardings)
 
     def forward_pass(
-        self, h: Hparams, ids: f32[b"B/d L"], is_seq_start: bool_[b"batch/d len"]
+        self, h: Hparams, ids: u32[b"B/d L"], is_seq_start: bool_[b"batch/d len"]
     ) -> f32[b"B/d L M/t"]:
         embed = shardops.all_gather("V/t M/d -> V/t M", jnp.bfloat16(self.embed))
         one_hot_ids = jax.nn.one_hot(ids, self.embed.shape[0])
@@ -298,13 +298,12 @@ class Model:
                 "g F B/d L/t, F M -> g M B/d L/t", out, linear
             )
 
-            return x + out, ()
+            return jnp.bfloat16(x + out), ()
 
         x, () = jax.lax.scan(
             loop_body,
-            ids,
+            jnp.bfloat16(x),
             (self.kernel, self.linear, self.ln),
-            length=h.layers,
         )
         unembed = shardops.all_gather("V/t M/d -> V/t M", jnp.bfloat16(self.unembed))
         logits = shardops.einsum_unreduced(

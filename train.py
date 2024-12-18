@@ -411,11 +411,9 @@ class Model:
                 preferred_element_type=jnp.float32,
             )
             logits = jnp.where(causal_mask, logits, -1e10)
-            logits = jax.lax.select(
-                h.apply_cope,
-                cope.apply(q, logits),
-                logits,
-            )
+
+            if h.apply_cope:
+                logits = cope.apply(q, logits)
 
             probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
 

@@ -1,7 +1,7 @@
-# python -m train --config-name=c4_a100x8x4_10m +paths.model_name=270m
+# python -m train --config-name=c4_a100x8x4_37m +paths.model_name=270m
 defaults:
-- synthetic_base
-- _self_
+  - wikitext103_base
+  - _self_
 
 num_hosts: 4
 
@@ -10,32 +10,31 @@ mesh:
   t: 1
 
 training:
-  warmup_steps: 120 
-  steps:        1200 
-  steps_for_lr: 1200
-  learning_rate: 1.5e-3 
+  warmup_steps: 240
+  steps:        2400
+  steps_for_lr: 2400
+  learning_rate: 1.35e-2
   tokens:
     batch: 256
-    len: 1024
   use_grad_clip: true
-  use_gpu: false 
-  use_checkpoint: false 
+  use_gpu: false
+  use_checkpoint: false
 
 model:
   d_model: 256
   n_q_per_kv: 1
-  n_kv: 16 
-  d_head: 64 
-  d_ff: 1024 
+  n_kv: 16
+  d_head: 64
+  d_ff: 1024
   layers: 8
-  vocab: 49 
+  vocab: 32768
 
   base:
-    d_model: 256 
+    d_model: 256
     n_q_per_kv: 1
-    n_kv: 16 
-    d_head: 64 
-    d_ff: 1024 
+    n_kv: 16
+    d_head: 64
+    d_ff: 1024
 
   rope_max_timescale: 10000
   cope_n_pos_max: 64
@@ -47,12 +46,12 @@ model:
   zero_queries: true
   zero_unembed: true
 
-  parameterization: "sp" 
+  parameterization: "sp"
   fully_aligned: false
-  gamma_embed: 1. 
-  gamma_hidden: 1. 
+  gamma_embed: 1.
+  gamma_hidden: 1.
   gamma_unembed: 1.
-  
+
 checkpoint_interval: 9200
 
 paths:

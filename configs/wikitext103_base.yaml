@@ -21,8 +21,14 @@ training:
   cosine_learning_rate_final_fraction: 0.1
   use_grad_clip: true
   use_gpu: false
-  use_checkpoint: true
 
+hf_dataset:
+  path: iohadrubin/wikitext-103-raw-v1
+  name: default
+  num_workers: 1 
+  tokenizer: mistralai/Mistral-7B-v0.1 # may require huggingface-cli login
+  sequences_packed_per_batch: 120
+  seed: 0
 
 paths:
   # root_working_dir can also be a path on a local filesystem
@@ -36,6 +42,3 @@ mesh:
 
 io:
   max_io_threads: 1024
-
-synthetic_dataset:
-  seed: 420

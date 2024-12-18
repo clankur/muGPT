@@ -25,6 +25,10 @@ model:
   vocab: 32768 
   d_ff: 1024
   rope_max_timescale: 256
+  cope_n_pos_max: 64
+  apply_cope: true
+  apply_rope: true
+
   a_attn: 1
   a_output: 1
   zero_queries: true

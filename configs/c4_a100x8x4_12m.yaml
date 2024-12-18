@@ -27,7 +27,11 @@ model:
   d_ff: 512 
   vocab: 32768
 
+  # hyperparameters for positional embeddings
   rope_max_timescale: 10000
+  cope_n_pos_max: 64
+  apply_cope: true
+  apply_rope: true
 
   base:
     d_model: 128

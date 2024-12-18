@@ -210,6 +210,7 @@ class Model:
     unembed: f32["vocab/t d_model/d"]
 
     @staticmethod
+    @typechecked
     def init(h: Hparams, rng: PRNGKey) -> "Model":
         assert h.d_model % h.groups == 0
         in_channels, out_channels = (
@@ -232,7 +233,7 @@ class Model:
             (h.vocab, h.d_model),
             dtype=jnp.float32,
         )
-
+        # TODO: figure out how to initialize kernel scaling
         kernel_scale = 1.0
         kernel_shape = (
             h.layers,
@@ -260,12 +261,12 @@ class Model:
         return jax.tree.map(lax.with_sharding_constraint, arrays, shardings)
 
     def forward_pass(
-        self, hparams: Hparams, ids: f32[b"B/d L"], is_seq_start: bool_[b"batch/d len"]
+        self, h: Hparams, ids: f32[b"B/d L"], is_seq_start: bool_[b"batch/d len"]
     ) -> f32[b"B/d L M/t"]:
         embed = shardops.all_gather("V/t M/d -> V/t M", jnp.bfloat16(self.embed))
         one_hot_ids = jax.nn.one_hot(ids, self.embed.shape[0])
         x = shardops.einsum_unreduced("B/d L V/t, V/t M -> B/d L M", one_hot_ids, embed)
-        x = einops.rearrange(x, "B L (g fan_in) -> g fan_in B L", g=hparams.groups)
+        x = einops.rearrange(x, "B L (g fan_in) -> g fan_in B L", g=h.groups)
 
         segment_ids = jnp.cumsum(is_seq_start, axis=1)
         # TODO: mask is not used, assess how we work it in if needed
@@ -292,7 +293,7 @@ class Model:
 
             out = jax.nn.relu(out)
             out = layer_norm(out) * ln
-            out = jax.lax.dropout(out, rate=hparams.dropout)
+            out = jax.lax.dropout(out, rate=h.dropout)
             out = shardops.einsum_unreduced(
                 "g F B/d L/t, F M -> g M B/d L/t", out, linear
             )
@@ -303,7 +304,7 @@ class Model:
             loop_body,
             ids,
             (self.kernel, self.linear, self.ln),
-            length=hparams.layers,
+            length=h.layers,
         )
         unembed = shardops.all_gather("V/t M/d -> V/t M", jnp.bfloat16(self.unembed))
         logits = shardops.einsum_unreduced(

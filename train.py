@@ -642,7 +642,7 @@ class Alibi:
         slopes = shardops.psum_scatter("K -> K/t", slopes)
         return Alibi(slopes=slopes)
 
-    def get_bias(self, logits: f32["B/d Qlen Klen Q K/t"]) -> f32["1 Qlen Klen 1 K/t"]:
+    def apply(self, logits: f32["B/d Qlen Klen Q K/t"]) -> f32["1 Qlen Klen 1 K/t"]:
         Qlen = logits.shape[1]
         slopes = einops.rearrange(self.slopes, "K -> 1 1 1 K")
 
@@ -652,7 +652,7 @@ class Alibi:
         bias: f32["1 Qlen Klen 1 K/t"] = einops.rearrange(
             position_bias * slopes, "Qlen Klen 1 K -> 1 Qlen Klen 1 K"
         )
-        return bias
+        return logits + bias
 
 
 @pytree_dataclass

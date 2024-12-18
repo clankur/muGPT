@@ -63,29 +63,12 @@ class BaseWidths:
 @dataclass(frozen=True)
 class Hparams:
     d_model: int
-    n_q_per_kv: int
-    n_kv: int
-    d_head: int
-    vocab: int
-    d_ff: int
+    d_hidden: int
+    kernel_size: int
+    groups: int
+    dropout: float
     layers: int
-    base: BaseWidths
-
-    # fields for position embeddings
-    rope_max_timescale: int
-
-    # parameters for mup
-    a_attn: float
-    a_output: float
-    zero_queries: bool
-    zero_unembed: bool
-
-    # parameters for exp scaling
-    parameterization: str
-    fully_aligned: bool
-    gamma_embed: float
-    gamma_hidden: float
-    gamma_unembed: float
+    vocab: int
 
 
 def get_parameterization(style: str, fully_aligned: bool = True):
@@ -220,355 +203,6 @@ class SyntheticMetrics:
 
 @pytree_dataclass
 class Model:
-    embed: f32["vocab/t d_model/d"]
-    unembed: f32["vocab/t d_model/d"]
-    ln1: f32["layers d_model/t/d"]
-    ln2: f32["layers d_model/t/d"]
-    w_q: f32["layers d_model/d n_q_per_kv n_kv/t d_head"]
-    w_kv: f32["layers 2 d_model/d n_kv/t d_head"]
-    w_o: f32["layers d_model/d n_q_per_kv n_kv/t d_head"]
-    w_gate: f32["layers d_model/d d_ff/t"]
-    w_up: f32["layers d_model/d d_ff/t"]
-    w_down: f32["layers d_model/d d_ff/t"]
-    final_layer_norm: f32["d_model/d/t"]
-
-    @staticmethod
-    @typechecked
-    def init(h: Hparams, rng: PRNGKey) -> "Model":
-        # https://github.com/google/jax/issues/20390 for ones_like with sharding.
-        ln1 = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
-        ln2 = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
-        final_layer_norm = jnp.ones((h.d_model,), dtype=jnp.float32)
-
-        # All of wi/wq/wo/wo/w_kv use truncated_normal initializers with 'fan_in' scaling,
-        # i.e. variance set to 1.0/fan_in.
-        # The constant is stddev of standard normal truncated to (-2, 2)
-        truncated_normal_stddev = 0.87962566103423978
-        p = get_parameterization(h.parameterization)
-        base = h.base
-
-        embed_scale = (
-            math.sqrt(base.d_model) / (h.d_model * truncated_normal_stddev)
-        ) ** (p.embed_init_var)
-        # scale for tensors with d_model fan_in and truncated normal truncated to (-2, 2)
-        d_model_scale = (
-            math.sqrt(base.d_model) / (h.d_model * truncated_normal_stddev)
-        ) ** (p.hidden_init_var)
-        w_kv_scale = d_model_scale
-        target_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
-        base_head_dim = base.n_q_per_kv * base.n_kv * base.d_head
-        w_o_scale = (
-            math.sqrt(base_head_dim) / (target_head_dim * truncated_normal_stddev)
-        ) ** (p.hidden_init_var)
-        w_up_scale = d_model_scale
-        w_down_scale = (math.sqrt(base.d_ff) / (h.d_ff * truncated_normal_stddev)) ** (
-            p.hidden_init_var
-        )
-
-        w_kv_shape = (h.layers, 2, h.d_model, h.n_kv, h.d_head)
-        w_kv = w_kv_scale * jax.random.truncated_normal(
-            fold_in_str(rng, "w_kv"), -2, 2, w_kv_shape, dtype=jnp.float32
-        )
-
-        ff_shape = (h.layers, h.d_model, h.d_ff)
-        embed = embed_scale * jax.random.normal(
-            jax_extra.fold_in_str(rng, "embed"), (h.vocab, h.d_model), dtype=jnp.float32
-        )
-        w_gate = w_up_scale * jax.random.truncated_normal(
-            fold_in_str(rng, "w_gate"), -2, 2, ff_shape, dtype=jnp.float32
-        )
-        w_up = w_up_scale * jax.random.truncated_normal(
-            fold_in_str(rng, "w_up"), -2, 2, ff_shape, dtype=jnp.float32
-        )
-        w_down = w_down_scale * jax.random.truncated_normal(
-            fold_in_str(rng, "w_down"), -2, 2, ff_shape, dtype=jnp.float32
-        )
-
-        w_q_scale = d_model_scale
-        w_q_shape = (h.layers, h.d_model, h.n_q_per_kv, h.n_kv, h.d_head)
-        w_o_shape = w_q_shape
-        unembed_scale = (
-            math.sqrt(base.d_model) / (h.d_model * truncated_normal_stddev)
-        ) ** (p.unembed_init_var)
-        w_o = w_o_scale * jax.random.truncated_normal(
-            fold_in_str(rng, "w_o"), -2, 2, w_o_shape, dtype=jnp.float32
-        )
-
-        if h.zero_queries:
-            w_q = jnp.zeros(w_q_shape, dtype=jnp.float32)
-        else:
-            w_q = w_q_scale * jax.random.truncated_normal(
-                fold_in_str(rng, "w_q"), -2, 2, w_q_shape, dtype=jnp.float32
-            )
-
-        if h.zero_unembed:
-            unembed = jnp.zeros((h.vocab, h.d_model), dtype=jnp.float32)
-        else:
-            unembed = unembed_scale * jax.random.truncated_normal(
-                fold_in_str(rng, "unembed"),
-                -2,
-                2,
-                (h.vocab, h.d_model),
-                dtype=jnp.float32,
-            )
-        arrays = Model(
-            embed=embed,
-            unembed=unembed,
-            ln1=ln1,
-            ln2=ln2,
-            w_q=w_q,
-            w_kv=w_kv,
-            w_o=w_o,
-            w_gate=w_gate,
-            w_up=w_up,
-            w_down=w_down,
-            final_layer_norm=final_layer_norm,
-        )
-        shardings = make_shardings(Model)
-        return jax.tree.map(lax.with_sharding_constraint, arrays, shardings)
-
-    @typechecked
-    def forward_pass(
-        self, h: Hparams, ids: u32[b"B/d L"], is_seq_start: bool_[b"B/d L"]
-    ) -> f32[b"B/d L V/t"]:
-        p = get_parameterization(h.parameterization)
-        embed_mult = (h.d_model / h.base.d_model) ** -p.embed_param_mult
-        hidden_mult = (h.d_model / h.base.d_model) ** -p.hidden_param_mult
-        unembed_mult = (h.d_model / h.base.d_model) ** -p.unembed_param_mult
-
-        # Initial embedding lookup.
-        embed = embed_mult * shardops.all_gather(
-            "V/t M/d -> V/t M", jnp.bfloat16(self.embed)
-        )
-        one_hot_ids = jax.nn.one_hot(ids, self.embed.shape[0])
-        x = shardops.einsum_unreduced("B/d L V/t, V/t M -> B/d L M", one_hot_ids, embed)
-
-        x = shardops.psum_scatter("B/d L M -> B/d L M/t", x)
-
-        L = ids.shape[1]
-        segment_ids = jnp.cumsum(is_seq_start, axis=1)
-        segment_mask: bool_[b"B/d L L"] = (
-            segment_ids[:, :, jnp.newaxis] == segment_ids[:, jnp.newaxis, :]
-        )
-        segment_mask: bool_[b"B/d L L 1 1"] = segment_mask[
-            ..., jnp.newaxis, jnp.newaxis
-        ]  # add axes for q_per_k, num_kv_heads dimensions
-        causal_mask: bool_[b"1 L L 1 1"] = jnp.tril(
-            jnp.ones((L, L), dtype=jnp.bool_), 0
-        )[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
-        causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
-
-        rope_table = RopeTable.create(L, h)
-
-        # Transformer blocks.
-        @explicit_activation_checkpointing
-        @typechecked
-        def loop_body(
-            x: bf16[b"B/d L M/t"], layer_weights: Any
-        ) -> Tuple[bf16[b"B/d L M/t"], Tuple[()]]:
-            w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2 = layer_weights
-
-            # Pre-attention RMSNorm
-            ln1 = shardops.all_gather("M/t/d -> M", jnp.float32(ln1))
-            gx = shardops.all_gather("B/d L M/t -> B/d L M", x)
-            nx = jnp.bfloat16(rms_norm(gx) * ln1)
-
-            # Attention, using Grouped Query Attention and RoPE position embeddings.
-            w_q = shardops.all_gather("M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_q))
-            q = save_for_backward(
-                hidden_mult
-                * shardops.einsum_unreduced(
-                    "B/d L M, M Q K/t D -> B/d L Q K/t D", nx, w_q
-                )
-            )
-            q = rope_table.apply("L D -> 1 L 1 1 D", q)
-            w_kv = shardops.all_gather("2 M/d K/t D -> 2 M K/t D", jnp.bfloat16(w_kv))
-            k, v = hidden_mult * shardops.einsum_unreduced(
-                "B/d L M, k_v M K/t D -> k_v B/d L K/t D", nx, w_kv
-            )
-            k = save_for_backward(k)
-            v = save_for_backward(v)
-            k = rope_table.apply("L d -> 1 L 1 d", k)
-
-            logit_scale = jax.lax.select(
-                h.parameterization.lower() == "mup",
-                h.a_attn * math.sqrt(h.base.d_head) / h.d_head,
-                1.0 / math.sqrt(h.d_head),
-            )
-            logits = logit_scale * shardops.einsum_unreduced(
-                "B/d Qlen Q K/t D, B/d Klen K/t D -> B/d Qlen Klen Q K/t",
-                q,
-                k,
-                preferred_element_type=jnp.float32,
-            )
-            logits = jnp.where(causal_mask, logits, -1e10)
-            probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
-            attn_out = shardops.einsum_unreduced(
-                "B/d Qlen Klen Q K/t, B/d Klen K/t D -> B/d Qlen Q K/t D", probs, v
-            )
-            w_o = shardops.all_gather("M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_o))
-            attn_out = hidden_mult * shardops.einsum_unreduced(
-                "B/d Qlen Q K/t D, M Q K/t D -> B/d Qlen M", attn_out, w_o
-            )
-            attn_out = shardops.psum_scatter("B/d Qlen M -> B/d Qlen M/t", attn_out)
-            x = save_for_backward(x + attn_out)
-
-            # Pre-FFN RMSNorm
-            ln2 = save_for_backward(shardops.all_gather("M/t/d -> M", jnp.float32(ln2)))
-            gx = shardops.all_gather("B/d L M/t -> B/d L M", x)
-            nx = jnp.bfloat16(rms_norm(gx) * ln2)
-
-            # FFN, using SwiGLU
-            w_gate = shardops.all_gather("M/d F/t -> M F/t", jnp.bfloat16(w_gate))
-            gate_proj = save_for_backward(
-                hidden_mult
-                * shardops.einsum_unreduced("B/d L M, M F/t -> B/d L F/t", nx, w_gate)
-            )
-            w_up = shardops.all_gather("M/d F/t -> M F/t", jnp.bfloat16(w_up))
-            up_proj = save_for_backward(
-                hidden_mult
-                * shardops.einsum_unreduced("B/d L M, M F/t -> B/d L F/t", nx, w_up)
-            )
-            y = jax.nn.swish(gate_proj) * up_proj
-            w_down = shardops.all_gather("M/d F/t -> M F/t", jnp.bfloat16(w_down))
-
-            ffn_out_mult = (h.d_ff / h.base.d_ff) ** -p.hidden_param_mult
-            ffn_out = ffn_out_mult * shardops.einsum_unreduced(
-                "B/d L F/t, M F/t -> B/d L M", y, w_down
-            )
-            ffn_out = shardops.psum_scatter("B/d L M -> B/d L M/t", ffn_out)
-
-            return jnp.bfloat16(x + ffn_out), ()
-
-        x, () = jax.lax.scan(
-            loop_body,
-            jnp.bfloat16(x),
-            (
-                self.w_q,
-                self.w_kv,
-                self.w_o,
-                self.w_gate,
-                self.w_up,
-                self.w_down,
-                self.ln1,
-                self.ln2,
-            ),
-        )
-
-        # Final layernorm and output projection.
-        x = shardops.all_gather("B/d L M/t -> B/d L M", x)
-        ln = shardops.all_gather("M/t/d -> M", jnp.float32(self.final_layer_norm))
-        x = jnp.bfloat16(rms_norm(x) * ln)
-        unembed = unembed_mult * shardops.all_gather(
-            "V/t M/d -> V/t M", jnp.bfloat16(self.unembed)
-        )
-        logits = shardops.einsum_unreduced(
-            "B/d L M, V/t M -> B/d L V/t",
-            x,
-            unembed,
-            preferred_element_type=jnp.float32,
-        )
-
-        return logits
-
-    @typechecked
-    def loss(self, h: Hparams, batch: TokenBatch) -> Tuple[f32[b""], SyntheticMetrics]:
-        # Given sequence-packed targets:
-        #   [[1, 2], [3, 4, 5], [6, 7, 8, 9]]
-        # we want inputs:
-        #   [[0, 1], [0, 3, 4], [0, 6, 7, 8]]
-        # which we get by shifting the targets right by 1 and
-        # masking sequence-start tokens to 0.
-        inputs = jnp.pad(batch.targets[:, :-1], pad_width=((0, 0), (1, 0)))
-        is_seq_start: bool_[b"batch/d len"] = batch.is_seq_start
-        inputs: u32[b"batch/d len"] = jnp.where(is_seq_start, 0, inputs)
-
-        logits: f32[b"batch/d len V/t"] = self.forward_pass(h, inputs, is_seq_start)
-        max_logits: f32[b"batch/d len 1"] = lax.pmax(
-            jnp.max(lax.stop_gradient(logits), axis=-1, keepdims=True), "t"
-        )
-        logits = logits - max_logits
-        sum_logits = lax.psum(jnp.sum(jnp.exp(logits), axis=-1, keepdims=True), "t")
-        logsumexp = jnp.log(sum_logits)
-        logprobs: f32[b"batch/d len V/t"] = logits - logsumexp
-        logprobs_at_targets = shardops.index_unreduced(
-            "batch/d len [V/t], batch/d len -> batch/d len", logprobs, batch.targets
-        )
-        logprobs_at_targets = shardops.psum_scatter(
-            "batch/d len -> batch/d len/t", logprobs_at_targets
-        )
-        if batch.loss_masks is not None:
-            logprobs_at_targets = jnp.where(batch.loss_masks, logprobs_at_targets, 0)
-        tokens_in_global_batch = logprobs_at_targets.size * jax.lax.psum(1, ("d", "t"))
-
-        probs_at_targets = jnp.exp(logprobs_at_targets)
-
-        batch_size, length = probs_at_targets.shape
-
-        if batch.comment_starts is not None and batch.comment_ends is not None:
-            comment_starts: u32[b"batch/d n_print"] = batch.comment_starts
-            comment_ends: u32[b"batch/d n_print"] = batch.comment_ends
-
-            batch_indices = jnp.arange(batch_size)[:, jnp.newaxis]  # (batch, 1)
-            start_char_probs = probs_at_targets[batch_indices, comment_starts]
-            avg_start_char_probs: f32[b""] = jnp.mean(start_char_probs)
-            last_char_probs = probs_at_targets[batch_indices, comment_ends - 1]
-            avg_last_char_probs: f32[b""] = jnp.mean(last_char_probs)
-
-            comment_mask = jax.vmap(
-                lambda starts_row, ends_row: jax.vmap(
-                    lambda start, end: (jnp.arange(length) >= start)
-                    & (jnp.arange(length) < end)
-                )(starts_row, ends_row)
-            )(comment_starts, comment_ends)
-
-            probs_at_targets = probs_at_targets[:, jnp.newaxis, :]
-
-            p_answer = jnp.prod(jnp.where(comment_mask, probs_at_targets, 1), axis=-1)
-
-            # average confidence for each prints in sequence
-            avg_p_answer: f32[b""] = jnp.mean(p_answer)
-
-            total_tokens = jnp.sum(comment_ends - comment_starts + 1)
-            comment_probs = jnp.where(comment_mask, probs_at_targets, 0)
-            average_char_confidence = jnp.sum(comment_probs) / total_tokens
-            max_char_confidence = jnp.max(comment_probs)
-
-            synth_metrics = SyntheticMetrics(
-                avg_confidence=avg_p_answer,
-                max_char_confidence=max_char_confidence,
-                avg_char_confidence=average_char_confidence,
-                avg_start_char_confidence=avg_start_char_probs,
-                avg_final_char_confidence=avg_last_char_probs,
-            )
-        else:
-            synth_metrics = SyntheticMetrics(
-                avg_confidence=jnp.float32(0.0),
-                max_char_confidence=jnp.float32(0.0),
-                avg_char_confidence=jnp.float32(0.0),
-                avg_start_char_confidence=jnp.float32(0.0),
-                avg_final_char_confidence=jnp.float32(0.0),
-            )
-
-        return (
-            -jnp.sum(logprobs_at_targets) / jnp.float32(tokens_in_global_batch),
-            synth_metrics,
-        )
-
-
-@dataclass(frozen=True)
-class ResConvHparams:
-    d_model: int
-    d_hidden: int
-    kernel_size: int
-    groups: int
-    dropout: float
-    layers: int
-    vocab: int
-
-
-@pytree_dataclass
-class ResConvModel:
     kernel: f32["layers groups d_hidden in_channels kernel_size"]
     linear: f32["layers d_hidden d_model"]
     ln: f32["layers d_model/t/d"]
@@ -576,7 +210,7 @@ class ResConvModel:
     unembed: f32["vocab/t d_model/d"]
 
     @staticmethod
-    def init(hparams: ResConvHparams, rng: PRNGKey) -> "ResConvModel":
+    def init(hparams: Hparams, rng: PRNGKey) -> "Model":
         assert hparams.d_model % hparams.groups == 0
         in_channels, out_channels = (
             hparams.d_model // hparams.groups,
@@ -619,15 +253,13 @@ class ResConvModel:
             linear_shape,
         )
         ln = jnp.ones((hparams.layers, hparams.d_model), dtype=jnp.float32)
-        arrays = ResConvModel(
+        arrays = Model(
             kernel=kernel, linear=linear, ln=ln, embed=embed, unembed=unembed
         )
-        shardings = make_shardings(ResConvModel)
+        shardings = make_shardings(Model)
         return jax.tree.map(lax.with_sharding_constraint, arrays, shardings)
 
-    def forward_pass(
-        self, hparams: ResConvHparams, ids: f32[b"B/d L"]
-    ) -> f32[b"B/d L M/t"]:
+    def forward_pass(self, hparams: Hparams, ids: f32[b"B/d L"]) -> f32[b"B/d L M/t"]:
         embed = shardops.all_gather("V/t M/d -> V/t M", jnp.bfloat16(self.embed))
         one_hot_ids = jax.nn.one_hot(ids, self.embed.shape[0])
         x = shardops.einsum_unreduced("B/d L V/t, V/t M -> B/d L M", one_hot_ids, embed)
@@ -674,7 +306,7 @@ class ResConvModel:
 
     @typechecked
     def loss(
-        self, h: ResConvHparams, batch: TokenBatch
+        self, h: Hparams, batch: TokenBatch, is_seq_start: bool_[b"batch/d len"]
     ) -> Tuple[f32[b""], SyntheticMetrics]:
         # Given sequence-packed targets:
         #   [[1, 2], [3, 4, 5], [6, 7, 8, 9]]
@@ -832,18 +464,13 @@ class TrainingHparams:
 
 @pytree_dataclass
 class State:
-    weights: Union[Model, ResConvModel]
-    adam_mu: Union[Model, ResConvModel]
-    adam_nu: Union[Model, ResConvModel]
+    weights: Model
+    adam_mu: Model
+    adam_nu: Model
 
     @staticmethod
-    def init(hparams: Union[Hparams, ResConvHparams], rng: PRNGKey) -> "State":
-        if isinstance(hparams, Hparams):
-            weights = Model.init(hparams, rng)
-        elif isinstance(hparams, ResConvHparams):
-            weights = ResConvModel.init(hparams, rng)
-        else:
-            raise ValueError(f"Unsupported hparams type: {type(hparams)}")
+    def init(hparams: Hparams, rng: PRNGKey) -> "State":
+        weights = Model.init(hparams, rng)
         adam_mu = jax.tree.map(lambda p: p * 0.0, weights)
         adam_nu = jax.tree.map(lambda p: p * 0.0, weights)
         return State(weights=weights, adam_mu=adam_mu, adam_nu=adam_nu)
@@ -854,7 +481,7 @@ class State:
 def training_step(
     state: State,
     step: u32[b""],
-    h: Union[Hparams, ResConvHparams],
+    h: Hparams,
     hparams: TrainingHparams,
     batch: TokenBatch,
 ) -> Tuple[Any, Metrics, SyntheticMetrics]:
@@ -905,38 +532,13 @@ def training_step(
         global_norm_square = jax.lax.psum(global_norm_square, ("d", "t"))
         global_norm = jnp.sqrt(global_norm_square)
 
-        if isinstance(h, Hparams):
-            base = h.base
-
-            p = get_parameterization(h.parameterization)
-            target_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
-            base_head_dim = base.n_q_per_kv * base.n_kv * base.d_head
-
-            embed_lr_scale = h.gamma_embed * (h.d_model / base.d_model) ** -p.embed_lr
-            unembed_lr_scale = (
-                h.gamma_unembed * (h.d_model / base.d_model) ** -p.unembed_lr
-            )
-            lr_scales = Model(
-                embed=embed_lr_scale,
-                unembed=unembed_lr_scale,
-                ln1=1.0,
-                ln2=1.0,
-                w_q=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
-                w_kv=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
-                w_o=h.gamma_hidden * (target_head_dim / base_head_dim) ** -p.hidden_lr,
-                w_gate=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
-                w_up=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
-                w_down=h.gamma_hidden * (h.d_ff / base.d_ff) ** -p.hidden_lr,
-                final_layer_norm=1.0,
-            )
-        elif isinstance(h, ResConvHparams):
-            lr_scales = ResConvModel(
-                embed=1.0,
-                unembed=1.0,
-                ln=1.0,
-                kernel=1.0,
-                linear=1.0,
-            )
+        lr_scales = Model(
+            embed=1.0,
+            unembed=1.0,
+            ln=1.0,
+            kernel=1.0,
+            linear=1.0,
+        )
 
         if hparams.use_grad_clip:
             clip_value = 1.0
@@ -1019,7 +621,7 @@ class Config:
     mesh: MeshConfig
     io: training_io.IOConfig
     model: Optional[Hparams] = None
-    res_conv_model: Optional[ResConvHparams] = None
+    res_conv_model: Optional[Hparams] = None
     flat_tokens: Optional[FlatTokensParams] = None
     hf_dataset: Optional[HuggingFaceDataParams] = None
     synthetic_dataset: Optional[SyntheticDataParams] = None
@@ -1040,10 +642,6 @@ class Config:
     ) -> Union[FlatTokensParams, HuggingFaceDataParams, SyntheticDataParams]:
         return self.flat_tokens or self.hf_dataset or self.synthetic_dataset
 
-    @cached_property
-    def model_data(self) -> Union[Model, ResConvModel]:
-        return self.model or self.res_conv_model
-
 
 def main_contained(config, logger):
     """Main program, which does not access external services except as specified by config.paths or logger."""
@@ -1061,8 +659,8 @@ def main_contained(config, logger):
 
         loader = get_loader("train", config.training_data, config.training.tokens)
         assert (
-            config.model_data.vocab > loader.max_token_id
-        ), f"{config.model_data.vocab} vs {loader.max_token_id}"
+            config.model.vocab > loader.max_token_id
+        ), f"{config.model.vocab} vs {loader.max_token_id}"
         config_name = hydra.core.hydra_config.HydraConfig.get()["job"]["config_name"]
         model_name = (
             config.paths.model_name
@@ -1072,7 +670,7 @@ def main_contained(config, logger):
         model_dir = os.path.join(config.paths.root_working_dir, model_name)
         print(model_name)
 
-        state = jax.jit(partial(State.init, config.model_data))(
+        state = jax.jit(partial(State.init, config.model))(
             fold_in_str(root_rng, "init")
         )
         if config.training.use_checkpoint:
@@ -1085,7 +683,7 @@ def main_contained(config, logger):
         # Explicitly compile training step, to record XLA HLO graph.
         # See https://bnikolic.co.uk/blog/python/jax/2022/02/22/jax-outputgraph-rev
         c_training_step = training_step.lower(
-            state, jnp.uint32(0), config.model_data, config.training, loader.load(0)
+            state, jnp.uint32(0), config.model, config.training, loader.load(0)
         ).compile()
         date = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
         # training_io.save_hlo_svg(os.path.join(model_dir, f'training_step_optimized_hlo_{date}.svg'), c_training_step)
@@ -1134,7 +732,7 @@ def main_contained(config, logger):
                 c_training_step = training_step.lower(
                     state,
                     jnp.uint32(0),
-                    config.model_data,
+                    config.model,
                     config.training,
                     loader.load(step),
                 ).compile()

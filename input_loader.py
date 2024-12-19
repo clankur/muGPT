@@ -22,6 +22,8 @@ https://docs.mosaicml.com/projects/streaming/en/stable/fundamentals/shuffling.ht
 """
 
 from concurrent.futures import ThreadPoolExecutor
+import os
+from multiprocessing import Pool
 import functools
 from typing import Tuple, Union, Optional, List
 import random
@@ -467,20 +469,36 @@ class SyntheticDataLoader:
             config.seed + (1 if split == "validation" else 0) + jax.process_index()
         )
         random.seed(self.base_seed)
-        self.iterator = SyntheticGenerator(
+        self.generator = SyntheticGenerator(
             token_batch_params.len, token_batch_params.batch
         )
         self.batch_size = token_batch_params.batch
         self.max_seq_len = token_batch_params.len
-        self.max_token_id = len(self.iterator.tokenizer.vocab) - 1
-
+        self.max_token_id = len(self.generator.tokenizer.vocab) - 1
         self.sharding = shardtypes.make_shardings(TokenBatch).targets
 
-    def load(self, step: int):
+        # TPU-optimized worker count: one worker per TPU core
+        self.executor = ThreadPoolExecutor(max_workers=jax.local_device_count())
 
+    def load(self, step: int):
         shape = (self.batch_size, self.max_seq_len)
-        tokens, comment_starts, comment_ends, loss_masks = next(self.iterator)
-        is_seq_start = jnp.zeros((shape), dtype=jnp.bool)
+
+        # Generate sequences in parallel
+        worker = functools.partial(_worker_generate_sequence, self.generator)
+        futures = [
+            self.executor.submit(worker) for _ in range(self.batch_size)
+        ]  # Removed the index parameter
+        results = [future.result() for future in futures]
+
+        # Unzip results
+        tokens, starts, ends, masks = zip(*results)
+
+        tokens = jnp.stack(tokens)
+        comment_starts = jnp.stack(starts)
+        comment_ends = jnp.stack(ends)
+        loss_masks = jnp.stack(masks)
+
+        is_seq_start = jnp.zeros(shape, dtype=jnp.bool_)
         is_seq_start = is_seq_start.at[:, 0].set(1)
 
         def get_shard(x: jax.Array, indexing: Tuple[slice]) -> jax.Array:
@@ -497,6 +515,22 @@ class SyntheticDataLoader:
         return TokenBatch(
             tokens, is_seq_start, comment_starts, comment_ends, loss_masks
         )
+
+    def __del__(self):
+        if hasattr(self, "executor"):
+            self.executor.shutdown()
+
+
+def _worker_generate_sequence(generator: SyntheticGenerator):
+    """Helper function to generate a single sequence"""
+    sequence, comment_start, comment_end, loss_mask = generator.get_next_sequence()
+    encoded_sequence = jnp.pad(
+        generator.tokenizer.encode(sequence),
+        (0, generator.seq_length - len(sequence)),
+        constant_values=generator.tokenizer.pad_token_id,
+    )
+    generator.reset_state()
+    return encoded_sequence, comment_start, comment_end, loss_mask
 
 
 def get_loader(

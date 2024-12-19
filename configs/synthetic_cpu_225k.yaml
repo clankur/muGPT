@@ -45,3 +45,6 @@ model:
   gamma_unembed: 1.
   
 checkpoint_interval: 9200
+
+paths:
+  root_working_dir: "/tmp/"

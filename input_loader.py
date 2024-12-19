@@ -478,7 +478,9 @@ class SyntheticDataLoader:
         self.sharding = shardtypes.make_shardings(TokenBatch).targets
 
         # TPU-optimized worker count: one worker per TPU core
-        self.executor = ThreadPoolExecutor(max_workers=jax.local_device_count())
+        workers_per_device = 4
+        n_workers = min(jax.local_device_count() * workers_per_device, self.batch_size)
+        self.executor = ThreadPoolExecutor(max_workers=n_workers)
 
     def load(self, step: int):
         shape = (self.batch_size, self.max_seq_len)

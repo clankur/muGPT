@@ -21,12 +21,13 @@ Mosaic's StreamingDatasets library uses a similar algorithm as us, which they ca
 https://docs.mosaicml.com/projects/streaming/en/stable/fundamentals/shuffling.html.
 """
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
-from multiprocessing import Pool
 import functools
 from typing import Tuple, Union, Optional, List
 import random
+import queue
+import threading
 
 from typeguard import typechecked
 from shardlib.shardtypes import bool_, pytree_dataclass, u32
@@ -477,30 +478,40 @@ class SyntheticDataLoader:
         self.max_token_id = len(self.generator.tokenizer.vocab) - 1
         self.sharding = shardtypes.make_shardings(TokenBatch).targets
 
-        # TPU-optimized worker count: one worker per TPU core
-        workers_per_device = 4
+        self.prefetch_size = 256  # Adjust based on memory constraints
+        self.batch_queue = queue.Queue(maxsize=self.prefetch_size)
+
+        # Increase workers - TPUs can handle more parallel workers
+        workers_per_device = 4  # Increased from 4
         n_workers = min(jax.local_device_count() * workers_per_device, self.batch_size)
         self.executor = ThreadPoolExecutor(max_workers=n_workers)
 
+        # Start prefetch thread
+        self.prefetch_thread = threading.Thread(
+            target=self._prefetch_worker, daemon=True
+        )
+        self.prefetch_thread.start()
+
+    def _prefetch_worker(self):
+        while True:
+            future_batches = [
+                self.executor.submit(self._generate_batch)
+                for _ in range(self.prefetch_size)
+            ]
+
+            # As results complete, add them to the queue
+            for future in as_completed(future_batches):
+                batch = future.result()
+                self.batch_queue.put(batch)
+
+    def _generate_batch(self):
+        return self.generator.generate_batch()
+
     def load(self, step: int):
         shape = (self.batch_size, self.max_seq_len)
+        tokens, comment_starts, comment_ends, loss_masks = self.batch_queue.get()
 
-        # Generate sequences in parallel
-        worker = functools.partial(_worker_generate_sequence, self.generator)
-        futures = [
-            self.executor.submit(worker) for _ in range(self.batch_size)
-        ]  # Removed the index parameter
-        results = [future.result() for future in futures]
-
-        # Unzip results
-        tokens, starts, ends, masks = zip(*results)
-
-        tokens = jnp.stack(tokens)
-        comment_starts = jnp.stack(starts)
-        comment_ends = jnp.stack(ends)
-        loss_masks = jnp.stack(masks)
-
-        is_seq_start = jnp.zeros(shape, dtype=jnp.bool_)
+        is_seq_start = jnp.zeros((shape), dtype=jnp.bool)
         is_seq_start = is_seq_start.at[:, 0].set(1)
 
         def get_shard(x: jax.Array, indexing: Tuple[slice]) -> jax.Array:
@@ -521,18 +532,6 @@ class SyntheticDataLoader:
     def __del__(self):
         if hasattr(self, "executor"):
             self.executor.shutdown()
-
-
-def _worker_generate_sequence(generator: SyntheticGenerator):
-    """Helper function to generate a single sequence"""
-    sequence, comment_start, comment_end, loss_mask = generator.get_next_sequence()
-    encoded_sequence = jnp.pad(
-        generator.tokenizer.encode(sequence),
-        (0, generator.seq_length - len(sequence)),
-        constant_values=generator.tokenizer.pad_token_id,
-    )
-    generator.reset_state()
-    return encoded_sequence, comment_start, comment_end, loss_mask
 
 
 def get_loader(

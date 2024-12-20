@@ -21,13 +21,10 @@ Mosaic's StreamingDatasets library uses a similar algorithm as us, which they ca
 https://docs.mosaicml.com/projects/streaming/en/stable/fundamentals/shuffling.html.
 """
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import os
+from concurrent.futures import ThreadPoolExecutor
 import functools
 from typing import Tuple, Union, Optional, List
 import random
-import queue
-import threading
 
 from typeguard import typechecked
 from shardlib.shardtypes import bool_, pytree_dataclass, u32
@@ -470,47 +467,19 @@ class SyntheticDataLoader:
             config.seed + (1 if split == "validation" else 0) + jax.process_index()
         )
         random.seed(self.base_seed)
-        self.generator = SyntheticGenerator(
+        self.iterator = SyntheticGenerator(
             token_batch_params.len, token_batch_params.batch
         )
         self.batch_size = token_batch_params.batch
         self.max_seq_len = token_batch_params.len
-        self.max_token_id = len(self.generator.tokenizer.vocab) - 1
+        self.max_token_id = len(self.iterator.tokenizer.vocab) - 1
+
         self.sharding = shardtypes.make_shardings(TokenBatch).targets
 
-        self.prefetch_size = 256  # Adjust based on memory constraints
-        self.batch_queue = queue.Queue(maxsize=self.prefetch_size)
-
-        # Increase workers - TPUs can handle more parallel workers
-        workers_per_device = 4  # Increased from 4
-        n_workers = min(jax.local_device_count() * workers_per_device, self.batch_size)
-        self.executor = ThreadPoolExecutor(max_workers=n_workers)
-
-        # Start prefetch thread
-        self.prefetch_thread = threading.Thread(
-            target=self._prefetch_worker, daemon=True
-        )
-        self.prefetch_thread.start()
-
-    def _prefetch_worker(self):
-        while True:
-            future_batches = [
-                self.executor.submit(self._generate_batch)
-                for _ in range(self.prefetch_size)
-            ]
-
-            # As results complete, add them to the queue
-            for future in as_completed(future_batches):
-                batch = future.result()
-                self.batch_queue.put(batch)
-
-    def _generate_batch(self):
-        return self.generator.generate_batch()
-
     def load(self, step: int):
-        shape = (self.batch_size, self.max_seq_len)
-        tokens, comment_starts, comment_ends, loss_masks = self.batch_queue.get()
 
+        shape = (self.batch_size, self.max_seq_len)
+        tokens, comment_starts, comment_ends, loss_masks = next(self.iterator)
         is_seq_start = jnp.zeros((shape), dtype=jnp.bool)
         is_seq_start = is_seq_start.at[:, 0].set(1)
 
@@ -528,10 +497,6 @@ class SyntheticDataLoader:
         return TokenBatch(
             tokens, is_seq_start, comment_starts, comment_ends, loss_masks
         )
-
-    def __del__(self):
-        if hasattr(self, "executor"):
-            self.executor.shutdown()
 
 
 def get_loader(

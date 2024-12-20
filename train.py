@@ -346,7 +346,6 @@ class Model:
         )
         one_hot_ids = jax.nn.one_hot(ids, self.embed.shape[0])
         x = shardops.einsum_unreduced("B/d L V/t, V/t M -> B/d L M", one_hot_ids, embed)
-
         x = shardops.psum_scatter("B/d L M -> B/d L M/t", x)
 
         L = ids.shape[1]
@@ -644,8 +643,8 @@ class Alibi:
     def create(hparams: Hparams) -> "Alibi":
         n_kv = hparams.n_kv
         start = 2.0 ** (-(2.0 ** -(jnp.log2(n_kv) - 3)))
-        slopes = start * (start ** jnp.arange(0, n_kv))
-        slopes = shardops.psum_scatter("K -> K/t", slopes)
+        slopes = start * (start ** shardops.arange("t", n_kv))
+
         return Alibi(slopes=slopes)
 
     def apply(self, logits: f32["B/d Qlen Klen Q K/t"]) -> f32["1 Qlen Klen 1 K/t"]:

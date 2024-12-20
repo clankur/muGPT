@@ -48,3 +48,7 @@ checkpoint_interval: 9200
 
 paths:
   root_working_dir: "/tmp/"
+
+synthetic_dataset:
+  batch_pool_size: 2
+  num_workers: 4

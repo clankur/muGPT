@@ -453,6 +453,7 @@ class HuggingFaceDataLoader:
 @dataclass(frozen=True)
 class SyntheticDataParams:
     seed: int = 0
+    num_workers: int = 8
 
 
 class SyntheticDataLoader:
@@ -463,13 +464,14 @@ class SyntheticDataLoader:
         token_batch_params: TokenBatchParams,
     ):
         assert split in ["train", "validation"], "Invalid split"
+        self.executor = ThreadPoolExecutor(max_workers=config.num_workers)
+        self.iterator = SyntheticGenerator(
+            token_batch_params.len, token_batch_params.batch, self.executor
+        )
         self.base_seed = (
             config.seed + (1 if split == "validation" else 0) + jax.process_index()
         )
         random.seed(self.base_seed)
-        self.iterator = SyntheticGenerator(
-            token_batch_params.len, token_batch_params.batch
-        )
         self.batch_size = token_batch_params.batch
         self.max_seq_len = token_batch_params.len
         self.max_token_id = len(self.iterator.tokenizer.vocab) - 1

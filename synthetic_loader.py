@@ -56,7 +56,7 @@ class SyntheticTokenizer:
 
 class SyntheticGenerator:
 
-    def __init__(self, seq_length: int, batch_size: int):
+    def __init__(self, seq_length: int, batch_size: int, executor: ThreadPoolExecutor):
         assert seq_length >= 256, "Sequence length must be at least 512"
         self.seq_length = seq_length
         self.min_padding = int(seq_length * 0.25)
@@ -66,6 +66,7 @@ class SyntheticGenerator:
         self.func_freq = 0.025
         self.pattern_cap = 5
         self.n_generate_funcs = 2
+        self.executor = executor
 
     def get_next_sequence(self):
         variables = {}
@@ -75,6 +76,12 @@ class SyntheticGenerator:
             "eval": lambda s: s,
             "choice": lambda s: random.choice(s),
         }
+        sequence = ""
+        total_len = self.seq_length - self.min_padding
+        n_void_calls = int(self.void_func_freq * total_len)
+        void_functions = ["print", "eval"]
+        current_len = len(sequence)
+        loss_mask = jnp.ones((self.seq_length), dtype=jnp.bool)
 
         def generate_random_variable():
             return trie.generate_random_variable()
@@ -153,7 +160,7 @@ class SyntheticGenerator:
             return generate_functions[func_name]
 
         def call_func(func_name: str, var: Optional[str] = None):
-            nonlocal variables
+            nonlocal variables, current_len, sequence
             if var:
                 value = variables[var]
             else:
@@ -194,12 +201,6 @@ class SyntheticGenerator:
             new_var = generate_random_variable()
             variables[new_var] = generate_functions[func_name](value)
             return f"{new_var}={func_name}({var})", new_var
-
-        sequence = ""
-        total_len = self.seq_length - self.min_padding
-        n_void_calls = int(self.void_func_freq * total_len)
-        void_functions = ["print", "eval"]
-        current_len = len(sequence)
 
         for _ in range(self.n_generate_funcs):
             generate_func()
@@ -292,13 +293,12 @@ class SyntheticGenerator:
     def generate_batch(
         self,
     ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        with ThreadPoolExecutor() as executor:
-            futures = [
-                executor.submit(self._generate_single_sequence)
-                for _ in range(self.batch_size)
-            ]
+        futures = [
+            self.executor.submit(self._generate_single_sequence)
+            for _ in range(self.batch_size)
+        ]
 
-            results = [future.result() for future in futures]
+        results = [future.result() for future in futures]
 
         sequences, starts, ends, loss_masks = zip(*results)
 

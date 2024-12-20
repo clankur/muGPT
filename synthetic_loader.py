@@ -56,11 +56,7 @@ class SyntheticTokenizer:
 class SyntheticGenerator:
 
     def __init__(self, seq_length: int, batch_size: int):
-        self.variables = {}
-        self.funcs = {}
-        self.trie = VariableTrie()
         assert seq_length >= 256, "Sequence length must be at least 512"
-
         self.seq_length = seq_length
         self.min_padding = int(seq_length * 0.25)
         self.tokenizer = SyntheticTokenizer()
@@ -70,57 +66,52 @@ class SyntheticGenerator:
         self.pattern_cap = 5
         self.n_generate_funcs = 2
 
-    def generate_random_variable(self):
-        """Generate a random lowercase variable name, randomly use last 3 entries as a prefix"""
-        return self.trie.generate_random_variable()
-
-    def generate_random_value(self, v_type) -> int | str | tuple:
-        if not v_type:
-            v_type = random.choice(["int", "str", "tuple"])
-        if v_type == "tuple":
-            tuple_size = random.randint(2, 4)
-            return tuple(random.randint(1, 999) for _ in range(tuple_size))
-        elif v_type == "int":
-            return random.randint(1, 999)
-        else:  # str
-            length = random.randint(1, 3)
-            letters = string.ascii_lowercase
-            return "".join(random.choice(letters) for _ in range(length))
-
-    def generate_assignment(self, v_type: Optional[str] = None):
-        """Generate an assignment statement for a new or existing variable."""
-        # If no variables exist or if the random chance dictates, generate a new variable
-        if not self.variables or v_type or random.random() < 0.5:
-            var = self.generate_random_variable()
-            value = self.generate_random_value(v_type)
-            self.variables[var] = value
-        else:
-            var = random.choice(list(self.variables.keys()))
-            if random.random() < 0.2:  # 20% chance to assign a new value
-                value = self.generate_random_value(v_type)
-                self.variables[var] = value
-            else:  # 80% chance to assign value of another variable
-                value = random.choice(list(self.variables.keys()))
-                self.variables[var] = self.variables[value]
-        if type(value) == str and self.variables[var] == value:
-            value = f"'{value}'"
-        return f"{var}={value}"
-
     def get_next_sequence(self):
-        sequence = ""
-        total_len = self.seq_length - self.min_padding
-        n_void_calls = int(self.void_func_freq * total_len)
+        variables = {}
+        trie = VariableTrie()
         generate_functions = {
             "print": lambda s: s,
             "eval": lambda s: s,
             "choice": lambda s: random.choice(s),
-            # "rep": lambda s: s * 2,
         }
-        void_functions = ["print", "eval"]
-        current_len = len(sequence)
+
+        def generate_random_variable():
+            return trie.generate_random_variable()
+
+        def generate_random_value(v_type):
+            if not v_type:
+                v_type = random.choice(["int", "str", "tuple"])
+            if v_type == "tuple":
+                tuple_size = random.randint(2, 4)
+                return tuple(random.randint(1, 999) for _ in range(tuple_size))
+            elif v_type == "int":
+                return random.randint(1, 999)
+            else:  # str
+                length = random.randint(1, 3)
+                letters = string.ascii_lowercase
+                return "".join(random.choice(letters) for _ in range(length))
+
+        def generate_assignment(v_type: Optional[str] = None):
+            # Move function to use local variables instead of self.variables
+            if not variables or v_type or random.random() < 0.5:
+                var = generate_random_variable()
+                value = generate_random_value(v_type)
+                variables[var] = value
+            else:
+                var = random.choice(list(variables.keys()))
+                if random.random() < 0.2:
+                    value = generate_random_value(v_type)
+                    variables[var] = value
+                else:
+                    value = random.choice(list(variables.keys()))
+                    variables[var] = variables[value]
+            if type(value) == str and variables[var] == value:
+                value = f"'{value}'"
+            return f"{var}={value}"
 
         def generate_func():
-            func_name = self.generate_random_variable()
+            # Move to use local generate_functions instead of self.funcs
+            func_name = generate_random_variable()
 
             # Randomly choose function type
             func_type = random.choice(["repeat", "map", "shift", "reverse"])
@@ -164,15 +155,16 @@ class SyntheticGenerator:
             return generate_functions[func_name]
 
         def call_func(func_name: str, var: Optional[str] = None):
-            nonlocal current_len, sequence, void_functions
+            # Update to use local variables instead of self.variables
+            nonlocal variables
             if var:
-                value = self.variables[var]
+                value = variables[var]
             else:
                 if func_name == "choice":
                     filter_cond = lambda x: isinstance(x, tuple)
                     choices = [
                         (key, value)
-                        for (key, value) in self.variables.items()
+                        for (key, value) in variables.items()
                         if filter_cond(value)
                     ]
                     v_type = "tuple"
@@ -182,17 +174,17 @@ class SyntheticGenerator:
                     )
                     choices = [
                         (key, value)
-                        for (key, value) in self.variables.items()
+                        for (key, value) in variables.items()
                         if filter_cond(value)
                     ]
                     v_type = "str"
                 if len(choices) < 2:
-                    stmnt = self.generate_assignment(v_type) + "\n"
+                    stmnt = generate_assignment(v_type) + "\n"
                     current_len += len(stmnt)
                     sequence += stmnt
                     choices = [
                         (key, value)
-                        for (key, value) in self.variables.items()
+                        for (key, value) in variables.items()
                         if filter_cond(value)
                     ]
                 var, value = random.choice(choices)
@@ -202,11 +194,15 @@ class SyntheticGenerator:
                     value = f"'{value}'"
                 return f"{func_name}({var}) # {value}", None
 
-            new_var = self.generate_random_variable()
-            self.variables[new_var] = generate_functions[func_name](value)
+            new_var = generate_random_variable()
+            variables[new_var] = generate_functions[func_name](value)
             return f"{new_var}={func_name}({var})", new_var
 
-        loss_mask = jnp.ones((self.seq_length), dtype=jnp.bool)
+        sequence = ""
+        total_len = self.seq_length - self.min_padding
+        n_void_calls = int(self.void_func_freq * total_len)
+        void_functions = ["print", "eval"]
+        current_len = len(sequence)
 
         for _ in range(self.n_generate_funcs):
             generate_func()
@@ -252,7 +248,7 @@ class SyntheticGenerator:
         eval_count = 0
         for target_pos, func, post_func in random_positions:
             while current_len < target_pos:
-                stmnt = self.generate_assignment()
+                stmnt = generate_assignment()
                 sequence += stmnt + "\n"
                 current_len += len(stmnt) + 1
 
@@ -274,7 +270,7 @@ class SyntheticGenerator:
             current_len += len(stmnt) + 1
 
         while current_len < total_len - self.min_padding:
-            stmnt = self.generate_assignment()
+            stmnt = generate_assignment()
             sequence += stmnt + "\n"
             current_len += len(stmnt) + 1
 
@@ -286,24 +282,12 @@ class SyntheticGenerator:
         ), f"Not all comment positions were set properly. \n{comment_start=}\n{comment_end=}"
         return sequence, comment_start, comment_end, loss_mask
 
-    def reset_state(self):
-        """Reset stateful attributes to ensure independence between batches."""
-        self.variables = {}
-        self.trie = VariableTrie()
-
-    def generate_batch(
-        self,
-    ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        """
-        Generate a batch of tokenized sequences and their respective print masks.
-
-        Returns:
-            Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]: A batch of tokenized sequences and their masks.
-        """
+    def generate_batch(self) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         sequences = []
         starts = []
         ends = []
         loss_masks = []
+
         for _ in range(self.batch_size):
             sequence, comment_start, comment_end, loss_mask = self.get_next_sequence()
             encoded_sequence = jnp.pad(
@@ -315,7 +299,6 @@ class SyntheticGenerator:
             starts.append(comment_start)
             ends.append(comment_end)
             loss_masks.append(loss_mask)
-            self.reset_state()
 
         return (
             jnp.stack(sequences),

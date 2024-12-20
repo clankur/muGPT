@@ -57,5 +57,4 @@ paths:
   root_working_dir: "/tmp"
 
 synthetic_dataset:
-  batch_pool_size: 8
-  num_workers: 16
+  num_workers: 32

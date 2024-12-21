@@ -53,8 +53,8 @@ model:
 checkpoint_interval: 9200
 
 paths:
-  # root_working_dir can also be a path on a local filesystem
   root_working_dir: "/tmp"
 
 synthetic_dataset:
+  prefetch_size: 8
   num_workers: 32

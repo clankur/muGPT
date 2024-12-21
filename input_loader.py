@@ -478,8 +478,8 @@ class SyntheticDataLoader:
         self.max_seq_len = token_batch_params.len
         self.max_token_id = len(self.iterator.tokenizer.vocab) - 1
         self.sharding = shardtypes.make_shardings(TokenBatch).targets
-
-        self.prefetch_queue = deque(maxlen=config.prefetch_size)
+        self.prefetch_size = config.prefetch_size
+        self.prefetch_queue = deque(maxlen=self.prefetch_size)
         self.prefetch_queue.append(self._generate_batch_sync())
         self._prefetch_batches()
 

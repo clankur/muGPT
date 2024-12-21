@@ -50,4 +50,5 @@ paths:
   root_working_dir: "/tmp/"
 
 synthetic_dataset:
+  prefetch_size: 2
   num_workers: 4

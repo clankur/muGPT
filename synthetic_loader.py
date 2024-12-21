@@ -5,7 +5,6 @@ from typing import Tuple, List, Optional
 import random
 import string
 from collections import defaultdict, deque
-from concurrent.futures import ThreadPoolExecutor
 
 
 class TrieNode:
@@ -56,12 +55,7 @@ class SyntheticTokenizer:
 
 class SyntheticGenerator:
 
-    def __init__(
-        self,
-        seq_length: int,
-        batch_size: int,
-        executor: ThreadPoolExecutor,
-    ):
+    def __init__(self, seq_length: int, batch_size: int):
         assert seq_length >= 256, "Sequence length must be at least 512"
         self.seq_length = seq_length
         self.min_padding = int(seq_length * 0.25)
@@ -71,7 +65,6 @@ class SyntheticGenerator:
         self.func_freq = 0.025
         self.pattern_cap = 5
         self.n_generate_funcs = 2
-        self.executor = executor
 
     def get_next_sequence(self):
         variables = {}
@@ -207,6 +200,12 @@ class SyntheticGenerator:
             variables[new_var] = generate_functions[func_name](value)
             return f"{new_var}={func_name}({var})", new_var
 
+        sequence = ""
+        total_len = self.seq_length - self.min_padding
+        n_void_calls = int(self.void_func_freq * total_len)
+        void_functions = ["print", "eval"]
+        current_len = len(sequence)
+
         for _ in range(self.n_generate_funcs):
             generate_func()
 
@@ -285,27 +284,23 @@ class SyntheticGenerator:
         ), f"Not all comment positions were set properly. \n{comment_start=}\n{comment_end=}"
         return sequence, comment_start, comment_end, loss_mask
 
-    def _generate_single_sequence(self):
-        """Helper method to generate and encode a single sequence"""
-        sequence, comment_start, comment_end, loss_mask = self.get_next_sequence()
-        encoded_sequence = jnp.pad(
-            self.tokenizer.encode(sequence),
-            (0, self.seq_length - len(sequence)),
-            constant_values=self.tokenizer.pad_token_id,
-        )
-        return encoded_sequence, comment_start, comment_end, loss_mask
+    def generate_batch(self) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        sequences = []
+        starts = []
+        ends = []
+        loss_masks = []
 
-    def generate_batch(
-        self,
-    ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        futures = [
-            self.executor.submit(self._generate_single_sequence)
-            for _ in range(self.batch_size)
-        ]
-
-        results = [future.result() for future in futures]
-
-        sequences, starts, ends, loss_masks = zip(*results)
+        for _ in range(self.batch_size):
+            sequence, comment_start, comment_end, loss_mask = self.get_next_sequence()
+            encoded_sequence = jnp.pad(
+                self.tokenizer.encode(sequence),
+                (0, self.seq_length - len(sequence)),
+                constant_values=self.tokenizer.pad_token_id,
+            )
+            sequences.append(encoded_sequence)
+            starts.append(comment_start)
+            ends.append(comment_end)
+            loss_masks.append(loss_mask)
 
         return (
             jnp.stack(sequences),

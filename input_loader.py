@@ -468,7 +468,7 @@ class SyntheticDataLoader:
         assert split in ["train", "validation"], "Invalid split"
         self.executor = ThreadPoolExecutor(max_workers=config.num_workers)
         self.iterator = SyntheticGenerator(
-            token_batch_params.len, token_batch_params.batch, self.executor
+            token_batch_params.len, token_batch_params.batch
         )
         self.base_seed = (
             config.seed + (1 if split == "validation" else 0) + jax.process_index()

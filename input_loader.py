@@ -25,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor
 import functools
 from typing import Tuple, Union, Optional, List
 import random
+from collections import deque
 
 from typeguard import typechecked
 from shardlib.shardtypes import bool_, pytree_dataclass, u32
@@ -454,6 +455,7 @@ class HuggingFaceDataLoader:
 class SyntheticDataParams:
     seed: int = 0
     num_workers: int = 8
+    prefetch_size: int = 2
 
 
 class SyntheticDataLoader:
@@ -475,13 +477,30 @@ class SyntheticDataLoader:
         self.batch_size = token_batch_params.batch
         self.max_seq_len = token_batch_params.len
         self.max_token_id = len(self.iterator.tokenizer.vocab) - 1
-
         self.sharding = shardtypes.make_shardings(TokenBatch).targets
 
+        self.prefetch_queue = deque(maxlen=config.prefetch_size)
+        self.prefetch_queue.append(self._generate_batch_sync())
+        self._prefetch_batches()
+
+    def _generate_batch_sync(self):
+        """Generate a batch synchronously and wrap in a completed future"""
+        batch = self.iterator.generate_batch()
+        future = self.executor.submit(lambda x: x, batch)  # Wrap in completed future
+        return future
+
+    def _prefetch_batches(self):
+        """Fill the prefetch queue to capacity with async batch generations"""
+        while len(self.prefetch_queue) < self.prefetch_size:
+            future = self.executor.submit(self.iterator.generate_batch)
+            self.prefetch_queue.append(future)
+
     def load(self, step: int):
+        current_future = self.prefetch_queue.popleft()
+        self._prefetch_batches()
+        tokens, comment_starts, comment_ends, loss_masks = current_future.result()
 
         shape = (self.batch_size, self.max_seq_len)
-        tokens, comment_starts, comment_ends, loss_masks = next(self.iterator)
         is_seq_start = jnp.zeros((shape), dtype=jnp.bool)
         is_seq_start = is_seq_start.at[:, 0].set(1)
 

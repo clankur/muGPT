@@ -56,7 +56,12 @@ class SyntheticTokenizer:
 
 class SyntheticGenerator:
 
-    def __init__(self, seq_length: int, batch_size: int, executor: ThreadPoolExecutor):
+    def __init__(
+        self,
+        seq_length: int,
+        batch_size: int,
+        executor: ThreadPoolExecutor,
+    ):
         assert seq_length >= 256, "Sequence length must be at least 512"
         self.seq_length = seq_length
         self.min_padding = int(seq_length * 0.25)

@@ -14,7 +14,6 @@ training:
     len: 64
   use_grad_clip: true
   use_gpu: false
-  use_checkpoint: false 
 
 model:
   d_model: 256

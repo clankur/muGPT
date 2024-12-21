@@ -618,7 +618,6 @@ class TrainingHparams:
     queue: Optional[str] = None
     use_grad_clip: bool = True
     use_gpu: bool = False
-    use_checkpoint: bool = False
 
 
 @pytree_dataclass
@@ -848,8 +847,7 @@ def main_contained(config, logger):
         state = jax.jit(partial(State.init, config.model))(
             fold_in_str(root_rng, "init")
         )
-        if config.training.use_checkpoint:
-            training_io.mkdir(model_dir)
+        training_io.mkdir(model_dir)
 
         state, start_step = training_io.load_checkpoint_if_it_exists(
             model_dir, state, config.io
@@ -878,11 +876,7 @@ def main_contained(config, logger):
         start_time = time.time()
 
         for step in range(start_step, config.training.steps):
-            if (
-                config.training.use_checkpoint
-                and step % config.checkpoint_interval == 0
-                and step > start_step
-            ):
+            if step % config.checkpoint_interval == 0 and step > start_step:
                 training_io.save_checkpoint(model_dir, step, state, config.io)
 
             # We profile on the second step, because the first step has a long pause for XLA

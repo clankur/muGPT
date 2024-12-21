@@ -875,6 +875,8 @@ def main_contained(config, logger):
             cum_metrics.raw_grad_norm += metrics.raw_grad_norm
             cum_metrics.learning_rate += metrics.learning_rate
 
+        start_time = time.time()
+
         for step in range(start_step, config.training.steps):
             if (
                 config.training.use_checkpoint
@@ -953,6 +955,9 @@ def main_contained(config, logger):
                 cum_metrics = output
             else:
                 update_metrics(output)
+
+        end_time = time.time()
+        print(f"Total time: {end_time - start_time:.2f} seconds")
 
 
 def clear_tpu_locks():

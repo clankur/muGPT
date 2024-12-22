@@ -391,8 +391,10 @@ class HuggingFaceDataLoader:
         )
         self.base_delay = 5
         self.config = config
-        dataset = load_dataset(config.path, config.name, streaming=True, split=split)
-        dataset = dataset.shuffle(seed=self.config.seed)
+        self.dataset = load_dataset(
+            config.path, config.name, streaming=True, split=split
+        )
+        dataset = self.dataset.shuffle(seed=self.config.seed)
         tokenized = dataset.select_columns(["text"]).map(
             self.tokenize, input_columns=["text"], remove_columns=["text"]
         )

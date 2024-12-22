@@ -24,6 +24,7 @@ https://docs.mosaicml.com/projects/streaming/en/stable/fundamentals/shuffling.ht
 from concurrent.futures import ThreadPoolExecutor
 import functools
 from typing import Tuple, Union, Optional, List
+import time
 import random
 
 from typeguard import typechecked
@@ -37,6 +38,7 @@ import numpy as np
 from jax.sharding import PartitionSpec as P
 import datetime
 from jax import numpy as jnp
+from huggingface_hub.utils import HfHubHTTPError
 
 # imports for hf dataloader
 import numpy as onp
@@ -350,6 +352,7 @@ class HuggingFaceDataParams:
     sequences_packed_per_batch: int
     name: Optional[str] = None
     seed: int = 0
+    max_retries: int = 5
 
 
 class HuggingFaceDataLoader:
@@ -386,11 +389,10 @@ class HuggingFaceDataLoader:
             return_attention_mask=False,
             return_tensors="np",
         )
-        self.dataset = load_dataset(
-            config.path, config.name, streaming=True, split=split
-        )
+        self.base_delay = 5
         self.config = config
-        dataset = self.dataset.shuffle(seed=self.config.seed)
+        dataset = load_dataset(config.path, config.name, streaming=True, split=split)
+        dataset = dataset.shuffle(seed=self.config.seed)
         tokenized = dataset.select_columns(["text"]).map(
             self.tokenize, input_columns=["text"], remove_columns=["text"]
         )
@@ -418,24 +420,42 @@ class HuggingFaceDataLoader:
         shape = (self.batch_size, self.max_seq_len)
         return flat_batch.reshape(shape), flat_is_start.reshape(shape)
 
+    def _get_next_batch(self, step):
+        for attempt in range(self.config.max_retries):
+            try:
+                batch, is_start = next(self.iterator)
+                return batch, is_start
+            except StopIteration:
+                dataset = self.dataset.shuffle(seed=self.config.seed + step)
+                tokenized = dataset.select_columns(["text"]).map(
+                    self.tokenize, input_columns=["text"], remove_columns=["text"]
+                )
+                dataloader = DataLoader(
+                    tokenized,
+                    num_workers=self.config.num_workers,
+                    collate_fn=self.collate,
+                    drop_last=True,
+                    batch_size=self.config.sequences_packed_per_batch,
+                )
+                self.iterator = iter(dataloader)
+                batch, is_start = next(self.iterator)
+            except HfHubHTTPError as e:
+                if e.response.status_code == 429:  # Too Many Requests
+                    if attempt == self.config.max_retries - 1:
+                        raise
+
+                    # Exponential backoff
+                    delay = self.base_delay * (2**attempt)
+                    print(
+                        f"Rate limit hit, waiting {delay} seconds before retry {attempt + 1}/{self.config.max_retries}"
+                    )
+                    time.sleep(delay)
+                else:
+                    raise
+
     def load(self, step):
         shape = (self.batch_size, self.max_seq_len)
-        try:
-            batch, is_start = next(self.iterator)
-        except StopIteration:
-            dataset = self.dataset.shuffle(seed=self.config.seed + step)
-            tokenized = dataset.select_columns(["text"]).map(
-                self.tokenize, input_columns=["text"], remove_columns=["text"]
-            )
-            dataloader = DataLoader(
-                tokenized,
-                num_workers=self.config.num_workers,
-                collate_fn=self.collate,
-                drop_last=True,
-                batch_size=self.config.sequences_packed_per_batch,
-            )
-            self.iterator = iter(dataloader)
-            batch, is_start = next(self.iterator)
+        batch, is_start = self._get_next_batch(step)
 
         def get_shard(x: jax.Array, indexing: Tuple[slice]) -> jax.Array:
             shard = x[indexing]

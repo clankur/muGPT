@@ -618,6 +618,7 @@ class TrainingHparams:
     queue: Optional[str] = None
     use_grad_clip: bool = True
     use_gpu: bool = False
+    use_single_pod: bool = False
 
 
 @pytree_dataclass
@@ -824,6 +825,11 @@ def main_contained(config, logger):
     # This is slower in compute time than 'unsafe_rbg' with flag '--xla_tpu_spmd_rng_bit_generator_unsafe=true',
     # but hopefully faster in memory time because it's fusable.
     # TODO: check this is true and if not, provide our own that actually is fusable.
+
+    # 4x 1 chip (2 cores) per process:
+    if config.training.use_single_pod:
+        os.environ["TPU_CHIPS_PER_HOST_BOUNDS"] = "1,1,1"
+        os.environ["TPU_HOST_BOUNDS"] = "1,1,1"
     jax.config.update("jax_threefry_partitionable", True)
     with Mesh(
         mesh_utils.create_device_mesh([config.mesh.d, config.mesh.t], jax.devices()),
@@ -1013,6 +1019,13 @@ def main(config):
             task.set_packages("requirements-gpu.txt")
         else:
             task.set_packages("requirements-tpu.txt")
+
+        result = subprocess.run(
+            ["datasets-cli", "env"], capture_output=True, text=True, check=True
+        )
+
+        print("Datasets CLI Environment:")
+        print(result.stdout)
 
         task.add_tags([git_branch_name])
         logger = task.get_logger()

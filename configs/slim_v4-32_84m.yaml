@@ -18,6 +18,7 @@ training:
     batch: 256
   use_grad_clip: true
   use_gpu: false
+  use_single_pod: false
 
 model:
   d_model: 512

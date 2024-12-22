@@ -1,0 +1,55 @@
+# python -m train --config-name=c4_a100x8x4_37m +paths.model_name=270m
+defaults:
+- wikitext103_base
+- _self_
+
+num_hosts: 1
+
+mesh:
+  d: 1 
+  t: 1
+
+training:
+  warmup_steps: 4800 
+  steps:        48000 
+  steps_for_lr: 48000
+  learning_rate: 7.3e-3
+  use_gpu: true
+  tokens:
+    len: 512
+    batch: 32 
+
+model:
+  d_model: 256 
+  n_q_per_kv: 1
+  n_kv: 16 
+  d_head: 64 
+  layers: 8
+  d_ff: 1024 
+  vocab: 32768
+
+  base:
+    d_model: 256 
+    n_q_per_kv: 1
+    n_kv: 16 
+    d_head: 64 
+    d_ff: 1024 
+
+  rope_max_timescale: 10000
+  cope_n_pos_max: 64
+  apply_cope: true
+  apply_rope: true
+
+  a_attn: 1.
+  a_output: 1.
+  zero_queries: true
+  zero_unembed: true
+
+  parameterization: "sp" 
+  fully_aligned: false
+  gamma_embed: 1. 
+  gamma_hidden: 1. 
+  gamma_unembed: 1.
+  
+checkpoint_interval: 9200
+

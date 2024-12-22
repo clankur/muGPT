@@ -6,7 +6,7 @@ defaults:
 num_hosts: 1
 
 mesh:
-  d: 1
+  d: 4
   t: 1
 
 training:

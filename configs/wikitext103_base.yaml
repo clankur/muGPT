@@ -23,8 +23,8 @@ training:
   use_gpu: false
 
 hf_dataset:
-  path: cerebras/SlimPajama-627B
-  name: default
+  path: Salesforce/wikitext
+  name: wikitext-103-raw-v1
   num_workers: 1
   tokenizer: mistralai/Mistral-7B-v0.1 # may require huggingface-cli login
   sequences_packed_per_batch: 120
@@ -33,7 +33,7 @@ hf_dataset:
 
 paths:
   # root_working_dir can also be a path on a local filesystem
-  root_working_dir: "/tmp/"
+  root_working_dir: "/media/clankur/HDD/models"
 
 num_hosts: 1
 

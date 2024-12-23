@@ -411,9 +411,14 @@ class HuggingFaceDataLoader:
                 else:
                     raise
         dataset = self.dataset.shuffle(seed=self.config.seed)
-        tokenized = dataset.select_columns(["text"]).map(
-            self.tokenize, input_columns=["text"], remove_columns=["text"]
-        )
+        if self.config.path == "bigcode/starcoderdata":
+            tokenized = dataset.select_columns(["content"]).map(
+                self.tokenize, input_columns=["content"], remove_columns=["content"]
+            )
+        else:
+            tokenized = dataset.select_columns(["text"]).map(
+                self.tokenize, input_columns=["text"], remove_columns=["text"]
+            )
         dataloader = DataLoader(
             tokenized,
             num_workers=self.config.num_workers,

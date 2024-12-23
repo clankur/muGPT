@@ -391,9 +391,25 @@ class HuggingFaceDataLoader:
         )
         self.base_delay = 5
         self.config = config
-        self.dataset = load_dataset(
-            config.path, config.name, streaming=True, split=split
-        )
+        for attempt in range(config.max_retries):
+            try:
+                self.dataset = load_dataset(
+                    config.path, config.name, streaming=True, split=split
+                )
+                break
+            except HfHubHTTPError as e:
+                if e.response.status_code == 429:  # Too Many Requests
+                    if attempt == config.max_retries - 1:
+                        raise
+
+                    # Exponential backoff
+                    delay = self.base_delay * (2**attempt)
+                    print(
+                        f"Rate limit hit, waiting {delay} seconds before retry {attempt + 1}/{config.max_retries}"
+                    )
+                    time.sleep(delay)
+                else:
+                    raise
         dataset = self.dataset.shuffle(seed=self.config.seed)
         tokenized = dataset.select_columns(["text"]).map(
             self.tokenize, input_columns=["text"], remove_columns=["text"]

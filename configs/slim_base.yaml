@@ -23,7 +23,7 @@ training:
   use_gpu: false
 
 hf_dataset:
-  path: cerebras/SlimPajama-627B
+  path: DKYoon/SlimPajama-6B
   name: default
   num_workers: 1
   tokenizer: mistralai/Mistral-7B-v0.1 # may require huggingface-cli login

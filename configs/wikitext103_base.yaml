@@ -33,7 +33,7 @@ hf_dataset:
 
 paths:
   # root_working_dir can also be a path on a local filesystem
-  root_working_dir: "/media/clankur/HDD/models"
+  root_working_dir: "/tmp/"
 
 num_hosts: 1
 

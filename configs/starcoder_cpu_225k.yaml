@@ -1,0 +1,53 @@
+# python -m train --config-name=c4_a100x8x4_10m +paths.model_name=270m
+defaults:
+- starcoder_base
+- _self_
+
+num_hosts: 1
+
+mesh:
+  d: 8 
+  t: 1
+
+training:
+  warmup_steps: 10
+  steps:        100
+  steps_for_lr: 100
+  learning_rate: 3.0e-2
+  tokens:
+    batch: 64 
+    len: 64
+  use_grad_clip: true
+  use_gpu: false
+  use_single_pod: false
+
+model:
+  d_model: 128
+  n_q_per_kv: 1 
+  n_kv: 1 
+  d_head: 32 
+  layers: 1
+  d_ff: 512 
+  vocab: 32768
+ 
+  rope_max_timescale: 10000
+  a_attn: 1.
+  a_output: 1.
+  zero_queries: true
+  zero_unembed: true
+  base:
+    d_model: 128
+    n_q_per_kv: 1
+    n_kv: 1 
+    d_head: 32 
+    d_ff: 512 
+  parameterization: "sp" 
+  fully_aligned: false
+  gamma_embed: 1. 
+  gamma_hidden: 1. 
+  gamma_unembed: 1.
+  
+checkpoint_interval: 9200
+
+hf_dataset:
+  num_workers: 0 

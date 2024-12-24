@@ -393,8 +393,14 @@ class HuggingFaceDataLoader:
         self.config = config
         for attempt in range(config.max_retries):
             try:
+                num_processes = jax.process_count()
+                process_index = jax.process_index()
+
                 self.dataset = load_dataset(
                     config.path, config.name, streaming=True, split=split
+                )
+                self.dataset = self.dataset.shard(
+                    num_shards=num_processes, index=process_index
                 )
                 break
             except HfHubHTTPError as e:
@@ -405,20 +411,20 @@ class HuggingFaceDataLoader:
                     # Exponential backoff
                     delay = self.base_delay * (2**attempt)
                     print(
-                        f"Rate limit hit, waiting {delay} seconds before retry {attempt + 1}/{config.max_retries}"
+                        f"Rate limit hit, waiting {delay} seconds before retry loading dataset {attempt + 1}/{config.max_retries}"
                     )
                     time.sleep(delay)
                 else:
                     raise
         dataset = self.dataset.shuffle(seed=self.config.seed)
-        if self.config.path == "bigcode/starcoderdata":
-            tokenized = dataset.select_columns(["content"]).map(
-                self.tokenize, input_columns=["content"], remove_columns=["content"]
-            )
-        else:
-            tokenized = dataset.select_columns(["text"]).map(
-                self.tokenize, input_columns=["text"], remove_columns=["text"]
-            )
+        self.in_col = (
+            "content" if self.config.path == "bigcode/starcoderdata" else "text"
+        )
+
+        tokenized = dataset.select_columns([self.in_col]).map(
+            self.tokenize, input_columns=[self.in_col], remove_columns=[self.in_col]
+        )
+
         dataloader = DataLoader(
             tokenized,
             num_workers=self.config.num_workers,
@@ -450,8 +456,10 @@ class HuggingFaceDataLoader:
                 return batch, is_start
             except StopIteration:
                 dataset = self.dataset.shuffle(seed=self.config.seed + step)
-                tokenized = dataset.select_columns(["text"]).map(
-                    self.tokenize, input_columns=["text"], remove_columns=["text"]
+                tokenized = dataset.select_columns([self.in_col]).map(
+                    self.tokenize,
+                    input_columns=[self.in_col],
+                    remove_columns=[self.in_col],
                 )
                 dataloader = DataLoader(
                     tokenized,
@@ -470,7 +478,7 @@ class HuggingFaceDataLoader:
                     # Exponential backoff
                     delay = self.base_delay * (2**attempt)
                     print(
-                        f"Rate limit hit, waiting {delay} seconds before retry {attempt + 1}/{self.config.max_retries}"
+                        f"Rate limit hit, waiting {delay} seconds before retry loading batch {attempt + 1}/{self.config.max_retries}"
                     )
                     time.sleep(delay)
                 else:

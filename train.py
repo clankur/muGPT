@@ -270,7 +270,7 @@ class Model:
         d_model_scale = (
             math.sqrt(base.d_model) / (h.d_model * truncated_normal_stddev)
         ) ** (p.hidden_init_var)
-        w_kv_scale = d_model_scale
+
         target_head_dim = h.n_h * h.d_head
         base_head_dim = base.n_h * base.d_head
         w_o_scale = (
@@ -279,11 +279,6 @@ class Model:
         w_up_scale = d_model_scale
         w_down_scale = (math.sqrt(base.d_ff) / (h.d_ff * truncated_normal_stddev)) ** (
             p.hidden_init_var
-        )
-
-        w_kv_shape = (h.layers, 2, h.d_model, h.n_h, h.d_head)
-        w_kv = w_kv_scale * jax.random.truncated_normal(
-            fold_in_str(rng, "w_kv"), -2, 2, w_kv_shape, dtype=jnp.float32
         )
 
         ff_shape = (h.layers, h.d_model, h.d_ff)
@@ -345,6 +340,10 @@ class Model:
             h.d_model,
             h.d_compressed,
         )
+        w_kv_scale = d_model_scale
+        d_compressed_scale = math.sqrt(base.d_compressed) / (
+            h.d_compressed * truncated_normal_stddev
+        ) ** (p.hidden_init_var)
         w_k_nope_shape = (
             h.layers,
             h.d_compressed,
@@ -362,7 +361,7 @@ class Model:
             w_k_compressed_shape,
             dtype=jnp.float32,
         )
-        w_k_nope = w_kv_scale * jax.random.truncated_normal(
+        w_k_nope = d_compressed_scale * jax.random.truncated_normal(
             fold_in_str(rng, "w_k_nope"), -2, 2, w_k_nope_shape, dtype=jnp.float32
         )
         w_v = w_kv_scale * jax.random.truncated_normal(

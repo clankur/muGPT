@@ -54,8 +54,9 @@ PRNGKey = Any
 # Split w_k into w_k_pe and w_k_nope
 #   k_pe = nx @ w_k_rope, k_compressed = nx @ w_k_compressed
 #       layer norm k_compressed
-#   k_pe = apply_rope(k_pe)
 #   k_nope = k_compressed @ w_nope
+#   k_pe = apply_rope(k_pe)
+#   broadcast k_pe to match k_nope's head dimension
 #   k = [ k_pe, k_nope ]
 # remove GQA for a pseudo-MHA/MQA
 # v gets its own projection
@@ -234,7 +235,7 @@ class Model:
     unembed: f32["vocab/t d_model/d"]
     ln1: f32["layers d_model/t/d"]
     ln2: f32["layers d_model/t/d"]
-    # Split query into PE and non-PE components
+    ln_compressed: f32["layers d_compressed/t/d"]
     w_q_pe: f32["layers d_model/d n_h/t d_head_half"]
     w_q_nope: f32["layers d_model/d n_h/t d_head_half"]
     w_k_pe: f32["layers d_model/d/t d_head_half"]
@@ -372,11 +373,15 @@ class Model:
             dtype=jnp.float32,
         )
 
+        # Add initialization for ln_compressed
+        ln_compressed = jnp.ones((h.layers, h.d_compressed), dtype=jnp.float32)
+
         arrays = Model(
             embed=embed,
             unembed=unembed,
             ln1=ln1,
             ln2=ln2,
+            ln_compressed=ln_compressed,
             w_q_pe=w_q_pe,
             w_q_nope=w_q_nope,
             w_k_pe=w_k_pe,
@@ -444,6 +449,7 @@ class Model:
                 w_down,
                 ln1,
                 ln2,
+                ln_compressed,
             ) = layer_weights
 
             # Pre-attention RMSNorm
@@ -487,12 +493,18 @@ class Model:
             )
             k_compressed = save_for_backward(k_compressed)
 
-            # Project k_compressed to k_nope
+            # Apply layer norm to k_compressed
+            ln_compressed = shardops.all_gather(
+                "C/t/d -> C", jnp.float32(ln_compressed)
+            )
+            n_k_compressed = jnp.bfloat16(rms_norm(k_compressed) * ln_compressed)
+
+            # Gather w_k_nope before using it
             w_k_nope = shardops.all_gather(
                 "C/d H/t half_D -> C H/t half_D", jnp.bfloat16(w_k_nope)
             )
             k_nope = hidden_mult * shardops.einsum_unreduced(
-                "B/d L C, C H/t half_D -> B/d L H/t half_D", k_compressed, w_k_nope
+                "B/d L C, C H/t half_D -> B/d L H/t half_D", n_k_compressed, w_k_nope
             )
             k_nope = save_for_backward(k_nope)
 
@@ -581,6 +593,7 @@ class Model:
                 self.w_down,
                 self.ln1,
                 self.ln2,
+                self.ln_compressed,
             ),
         )
 
@@ -715,7 +728,9 @@ class RopeTable:
 
 
 @typechecked
-def rms_norm(x: bf16[b"batch/d len M"]) -> bf16[b"batch/d len M"]:
+def rms_norm(
+    x: Union[bf16[b"batch/d len M"], bf16[b"batch/d len d_compressed"]]
+) -> Union[bf16[b"batch/d len M"], bf16[b"batch/d len d_compressed"]]:
     mean2 = save_for_backward(
         jnp.mean(jax.lax.square(jnp.float32(x)), axis=-1, keepdims=True)
     )
@@ -834,6 +849,7 @@ def training_step(
             unembed=unembed_lr_scale,
             ln1=1.0,
             ln2=1.0,
+            ln_compressed=1.0,
             w_q_pe=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
             w_q_nope=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
             w_k_pe=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,

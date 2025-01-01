@@ -339,18 +339,18 @@ class Model:
 
         # Split w_kv into separate k_pe, k_compressed, k_nope, and v projections
         d_head_half = h.d_head // 2
-        w_k_pe_shape = (h.layers, h.d_model, d_head_half)  # No head dimension for PE
+        w_k_pe_shape = (h.layers, h.d_model, d_head_half)
         w_k_compressed_shape = (
             h.layers,
             h.d_model,
             h.d_compressed,
-        )  # Compressed key projection
+        )
         w_k_nope_shape = (
             h.layers,
             h.d_compressed,
             h.n_h,
             d_head_half,
-        )  # Regular head dimension for nope
+        )
 
         w_k_pe = w_kv_scale * jax.random.truncated_normal(
             fold_in_str(rng, "w_k_pe"), -2, 2, w_k_pe_shape, dtype=jnp.float32
@@ -373,7 +373,6 @@ class Model:
             dtype=jnp.float32,
         )
 
-        # Add initialization for ln_compressed
         ln_compressed = jnp.ones((h.layers, h.d_compressed), dtype=jnp.float32)
 
         arrays = Model(
@@ -471,7 +470,6 @@ class Model:
                     "B/d L M, M H/t half_D -> B/d L H/t half_D", nx, w_q_pe
                 )
             )
-            # Apply RoPE to q_pe
             q_pe = rope_table.apply("L half_D -> 1 L 1 half_D", q_pe)
 
             q_nope = save_for_backward(
@@ -481,10 +479,8 @@ class Model:
                 )
             )
 
-            # Combine q_pe and q_nope
             q = jnp.concatenate([q_pe, q_nope], axis=-1)
 
-            # Compute compressed key representation
             w_k_compressed = shardops.all_gather(
                 "M/d/t C -> M C", jnp.bfloat16(w_k_compressed)
             )
@@ -493,13 +489,11 @@ class Model:
             )
             k_compressed = save_for_backward(k_compressed)
 
-            # Apply layer norm to k_compressed
             ln_compressed = shardops.all_gather(
                 "C/t/d -> C", jnp.float32(ln_compressed)
             )
             n_k_compressed = jnp.bfloat16(rms_norm(k_compressed) * ln_compressed)
 
-            # Gather w_k_nope before using it
             w_k_nope = shardops.all_gather(
                 "C/d H/t half_D -> C H/t half_D", jnp.bfloat16(w_k_nope)
             )

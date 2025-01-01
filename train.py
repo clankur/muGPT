@@ -847,7 +847,8 @@ def training_step(
             w_q_nope=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
             w_k_pe=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
             w_k_compressed=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
-            w_k_nope=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
+            w_k_nope=h.gamma_hidden
+            * (h.d_compressed / base.d_compressed) ** -p.hidden_lr,
             w_v=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
             w_o=h.gamma_hidden * (target_head_dim / base_head_dim) ** -p.hidden_lr,
             w_gate=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,

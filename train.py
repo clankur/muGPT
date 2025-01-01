@@ -66,6 +66,7 @@ class BaseWidths:
     d_model: int
     n_h: int
     d_head: int
+    d_compressed: int
     d_ff: int
 
 
@@ -74,6 +75,7 @@ class Hparams:
     d_model: int
     n_h: int
     d_head: int
+    d_compressed: int
     vocab: int
     d_ff: int
     layers: int
@@ -235,8 +237,9 @@ class Model:
     # Split query into PE and non-PE components
     w_q_pe: f32["layers d_model/d n_h/t d_head_half"]
     w_q_nope: f32["layers d_model/d n_h/t d_head_half"]
-    w_k_pe: f32["layers d_model/d n_h/t d_head_half"]
-    w_k_nope: f32["layers d_model/d n_h/t d_head_half"]
+    w_k_pe: f32["layers d_model/d/t d_head_half"]
+    w_k_compressed: f32["layers d_model/d/t d_compressed"]
+    w_k_nope: f32["layers d_compressed/d n_h/t d_head_half"]
     w_v: f32["layers d_model/d n_h/t d_head"]
     w_o: f32["layers d_model/d n_h/t d_head"]
     w_gate: f32["layers d_model/d d_ff/t"]
@@ -333,12 +336,30 @@ class Model:
                 dtype=jnp.float32,
             )
 
-        # Split w_kv into separate k_pe, k_nope, and v projections
-        w_k_pe_shape = (h.layers, h.d_model, h.n_h, d_head_half)
-        w_k_nope_shape = w_k_pe_shape
+        # Split w_kv into separate k_pe, k_compressed, k_nope, and v projections
+        d_head_half = h.d_head // 2
+        w_k_pe_shape = (h.layers, h.d_model, d_head_half)  # No head dimension for PE
+        w_k_compressed_shape = (
+            h.layers,
+            h.d_model,
+            h.d_compressed,
+        )  # Compressed key projection
+        w_k_nope_shape = (
+            h.layers,
+            h.d_compressed,
+            h.n_h,
+            d_head_half,
+        )  # Regular head dimension for nope
 
         w_k_pe = w_kv_scale * jax.random.truncated_normal(
             fold_in_str(rng, "w_k_pe"), -2, 2, w_k_pe_shape, dtype=jnp.float32
+        )
+        w_k_compressed = w_kv_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "w_k_compressed"),
+            -2,
+            2,
+            w_k_compressed_shape,
+            dtype=jnp.float32,
         )
         w_k_nope = w_kv_scale * jax.random.truncated_normal(
             fold_in_str(rng, "w_k_nope"), -2, 2, w_k_nope_shape, dtype=jnp.float32
@@ -359,6 +380,7 @@ class Model:
             w_q_pe=w_q_pe,
             w_q_nope=w_q_nope,
             w_k_pe=w_k_pe,
+            w_k_compressed=w_k_compressed,
             w_k_nope=w_k_nope,
             w_v=w_v,
             w_o=w_o,
@@ -413,6 +435,7 @@ class Model:
                 w_q_pe,
                 w_q_nope,
                 w_k_pe,
+                w_k_compressed,
                 w_k_nope,
                 w_v,
                 w_o,
@@ -455,26 +478,35 @@ class Model:
             # Combine q_pe and q_nope
             q = jnp.concatenate([q_pe, q_nope], axis=-1)
 
-            w_k_pe = shardops.all_gather(
-                "M/d H/t half_D -> M H/t half_D", jnp.bfloat16(w_k_pe)
+            # Compute compressed key representation
+            w_k_compressed = shardops.all_gather(
+                "M/d/t C -> M C", jnp.bfloat16(w_k_compressed)
             )
-            w_k_nope = shardops.all_gather(
-                "M/d H/t half_D -> M H/t half_D", jnp.bfloat16(w_k_nope)
+            k_compressed = hidden_mult * shardops.einsum_unreduced(
+                "B/d L M, M C -> B/d L C", nx, w_k_compressed
             )
-            # Compute k_pe and k_nope separately
-            k_pe = hidden_mult * shardops.einsum_unreduced(
-                "B/d L M, M H/t half_D -> B/d L H/t half_D", nx, w_k_pe
-            )
-            k_pe = save_for_backward(k_pe)
-            # Apply RoPE to k_pe
-            k_pe = rope_table.apply("L half_D -> 1 L 1 half_D", k_pe)
+            k_compressed = save_for_backward(k_compressed)
 
+            # Project k_compressed to k_nope
+            w_k_nope = shardops.all_gather(
+                "C/d H/t half_D -> C H/t half_D", jnp.bfloat16(w_k_nope)
+            )
             k_nope = hidden_mult * shardops.einsum_unreduced(
-                "B/d L M, M H/t half_D -> B/d L H/t half_D", nx, w_k_nope
+                "B/d L C, C H/t half_D -> B/d L H/t half_D", k_compressed, w_k_nope
             )
             k_nope = save_for_backward(k_nope)
 
-            # Combine k_pe and k_nope
+            w_k_pe = shardops.all_gather(
+                "M/d/t half_D -> M half_D", jnp.bfloat16(w_k_pe)
+            )
+            k_pe = hidden_mult * shardops.einsum_unreduced(
+                "B/d L M, M half_D -> B/d L half_D", nx, w_k_pe
+            )
+            k_pe = einops.rearrange(k_pe, "B L half_D -> B L 1 half_D")
+            k_pe = save_for_backward(rope_table.apply("L half_D -> 1 L 1 half_D", k_pe))
+            local_h = k_nope.shape[2]
+            k_pe = einops.repeat(k_pe, "B L 1 half_D -> B L H half_D", H=local_h)
+
             k = jnp.concatenate([k_pe, k_nope], axis=-1)
 
             w_v = shardops.all_gather("M/d K/t D -> M K/t D", jnp.bfloat16(w_v))
@@ -540,6 +572,7 @@ class Model:
                 self.w_q_pe,
                 self.w_q_nope,
                 self.w_k_pe,
+                self.w_k_compressed,
                 self.w_k_nope,
                 self.w_v,
                 self.w_o,
@@ -804,6 +837,7 @@ def training_step(
             w_q_pe=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
             w_q_nope=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
             w_k_pe=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
+            w_k_compressed=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
             w_k_nope=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
             w_v=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
             w_o=h.gamma_hidden * (target_head_dim / base_head_dim) ** -p.hidden_lr,

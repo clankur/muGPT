@@ -1,6 +1,6 @@
 # python -m train --config-name=c4_a100x8x4_37m +paths.model_name=270m
 defaults:
-  - slim_base
+  - starcoder_base
   - _self_
 
 num_hosts: 4

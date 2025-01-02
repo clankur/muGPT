@@ -3,41 +3,20 @@ defaults:
   - slim_base
   - _self_
 
-num_hosts: 4
-
-mesh:
-  d: 16
-  t: 1
-
-training:
-  warmup_steps: 240
-  steps:        2400
-  steps_for_lr: 2400
-  learning_rate: 1.35e-2
-  tokens:
-    length: 2048
-    batch: 256
-  use_grad_clip: true
-  use_gpu: false
-  use_single_pod: false
-
 model:
-  d_model: 256
+  d_model: 384
   n_q_per_kv: 1
-  n_kv: 16
-  d_head: 64
-  d_ff: 1024
-  layers: 8
-  vocab: 32768
-
+  n_kv: 8
+  d_head: 96
+  d_ff: 1536
+  layers: 6
+  
   base:
-    d_model: 256
+    d_model: 192
     n_q_per_kv: 1
     n_kv: 16
-    d_head: 64
-    d_ff: 1024
-
-  rope_max_timescale: 10000
+    d_head: 48
+    d_ff: 768
 
   a_attn: 1.
   a_output: 1.

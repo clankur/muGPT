@@ -54,14 +54,26 @@ PRNGKey = Any
 # 3 Stages
 #  1. Encoder that encodes chunks of the input into a concept embedding
 #     - Input: chunks of the input, Mask enabling attending to tokens within the same chunk AND to previous chunks
+#     - perform standard attention on the chunks with this mask
 #     - reduce for each chunk BLOCK_SIZE to a single embedding
-#  2. Decoder that decodes concept embedding to get the next concept embedding
+#  2. Concept Decoder that decodes concept embedding to get the next concept embedding
 #     - Input: concept embedding, Mask enabling attending to previous concept embeddings
 #     - run of the mill decoder
-#  3. Decoder that decodes concept embedding to get the output tokens
-#     - Input: concept embedding and previous concept embeddings, Mask enabling attending to previous tokens
-#     - mystery: how do we go from the number of blocks back to the sequence length?
+#  3. Token Decoder that decodes concept embedding to get the output tokens
+#     - Input: output concept embedding (z) from CausalEmbedding, Mask enabling attending to previous tokens
+#     - get tokenized embeddings, apply standard attention on them, get out, use x = x + out
+#     - apply cross attention
+#           - apply x_wq to x to get queries, apply x_wkv to z get keys and values
+#           - standard decoder after this with MLP
 #     - each embedding gets mapped back to a BLOCK_SIZE and we join them to form the sequence?
+
+# depending on the stage mask is different
+#   1. mask is all 1s for everything within chunk and previous chunks, shape (L, L)
+#   2. mask is standard causal mask, shape (block_size, block_size)
+#   3. mask is standard causal mask, shape (L, L)
+
+
+# convert model to Transformer so we can have different implementations of it across the stages
 
 
 @dataclass(frozen=True)
@@ -371,9 +383,21 @@ class Model:
         )[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
         causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
 
+        # TODO: add different masks for blocks
+        # encoder mask which is tril but with block size of 1s (L, L)
+        # ie).
+        #   block_size = 2
+        #   row_indices = jnp.arange(L)[:, None]  # Shape (L, 1)
+        #   col_indices = jnp.arange(L)[None, :]  # Shape (1, L)
+        #   block_mask = col_indices < (block_size * (row_indices + 1))
+        # embedding decoder mask which is tril of (block_size, block_size)
+        # decoder mask which is causal mask of (L, L)
+
+        # Encoder block
+
         rope_table = RopeTable.create(L, h)
 
-        # Transformer blocks.
+        # Concept Decoder blocks.
         @explicit_activation_checkpointing
         @typechecked
         def loop_body(
@@ -467,6 +491,8 @@ class Model:
                 self.ln2,
             ),
         )
+
+        # Token decoder
 
         # Final layernorm and output projection.
         x = shardops.all_gather("B/d L M/t -> B/d L M", x)

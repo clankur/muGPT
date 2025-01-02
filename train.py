@@ -50,6 +50,19 @@ P = PartitionSpec
 
 PRNGKey = Any
 
+# TODO:
+# 3 Stages
+#  1. Encoder that encodes chunks of the input into a concept embedding
+#     - Input: chunks of the input, Mask enabling attending to tokens within the same chunk AND to previous chunks
+#     - reduce for each chunk BLOCK_SIZE to a single embedding
+#  2. Decoder that decodes concept embedding to get the next concept embedding
+#     - Input: concept embedding, Mask enabling attending to previous concept embeddings
+#     - run of the mill decoder
+#  3. Decoder that decodes concept embedding to get the output tokens
+#     - Input: concept embedding and previous concept embeddings, Mask enabling attending to previous tokens
+#     - mystery: how do we go from the number of blocks back to the sequence length?
+#     - each embedding gets mapped back to a BLOCK_SIZE and we join them to form the sequence?
+
 
 @dataclass(frozen=True)
 class BaseWidths:

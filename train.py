@@ -50,17 +50,6 @@ P = PartitionSpec
 
 PRNGKey = Any
 
-# TODO:
-# Split w_k into w_k_pe and w_k_nope
-#   k_pe = nx @ w_k_rope, k_compressed = nx @ w_k_compressed
-#       layer norm k_compressed
-#   k_nope = k_compressed @ w_nope
-#   k_pe = apply_rope(k_pe)
-#   broadcast k_pe to match k_nope's head dimension
-#   k = [ k_pe, k_nope ]
-# remove GQA for a pseudo-MHA/MQA
-# v gets its own projection
-
 
 @dataclass(frozen=True)
 class BaseWidths:
@@ -334,23 +323,22 @@ class Model:
 
         # Split w_kv into separate k_pe, k_compressed, k_nope, and v projections
         d_head_half = h.d_head // 2
+        w_kv_scale = d_model_scale
+        d_compressed_scale = math.sqrt(base.d_compressed) / (
+            h.d_compressed * truncated_normal_stddev
+        ) ** (p.hidden_init_var)
         w_k_pe_shape = (h.layers, h.d_model, d_head_half)
         w_k_compressed_shape = (
             h.layers,
             h.d_model,
             h.d_compressed,
         )
-        w_kv_scale = d_model_scale
-        d_compressed_scale = math.sqrt(base.d_compressed) / (
-            h.d_compressed * truncated_normal_stddev
-        ) ** (p.hidden_init_var)
         w_k_nope_shape = (
             h.layers,
             h.d_compressed,
             h.n_h,
             d_head_half,
         )
-
         w_k_pe = w_kv_scale * jax.random.truncated_normal(
             fold_in_str(rng, "w_k_pe"), -2, 2, w_k_pe_shape, dtype=jnp.float32
         )
@@ -499,6 +487,7 @@ class Model:
             k_nope = hidden_mult * shardops.einsum_unreduced(
                 "B/d L C, C H/t half_D -> B/d L H/t half_D", n_k_compressed, w_k_nope
             )
+
             k_nope = save_for_backward(k_nope)
 
             w_k_pe = shardops.all_gather(

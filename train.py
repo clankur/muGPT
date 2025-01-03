@@ -493,13 +493,17 @@ class Model:
         causal_mask: bool_[b"1 L L 1 1"] = jnp.tril(
             jnp.ones((L, L), dtype=jnp.bool_), 0
         )[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
+        causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
         chunk_indices = jnp.arange(L) // h.block_size
         encoder_mask = chunk_indices[:, None] > chunk_indices[None, :]
-        encoder_mask = encoder_mask[..., jnp.newaxis, jnp.newaxis]
+        encoder_mask = encoder_mask[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
         concept_causal_mask = jnp.tril(jnp.ones((n_blocks, n_blocks), dtype=jnp.bool_))[
             jnp.newaxis, ..., jnp.newaxis, jnp.newaxis
         ]
-        causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
+        q_pos = jnp.arange(L)
+        k_pos = jnp.arange(L // h.block_size)
+        x_causal_mask = q_pos[:, None] // h.block_size >= k_pos[None, :]
+        x_causal_mask = x_causal_mask[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
         # TODO: Do we need to add segment data to other masks???
 
         rope_table = RopeTable.create(L, h)
@@ -801,7 +805,7 @@ class Model:
                 k,
                 preferred_element_type=jnp.float32,
             )
-
+            # need a mask of size L x n_blocks
             probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
             attn_out = shardops.einsum_unreduced(
                 "B/d L n_blocks Q K/t, B/d n_blocks K/t D -> B/d L Q K/t D",

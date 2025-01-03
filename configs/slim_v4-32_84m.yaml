@@ -15,7 +15,7 @@ training:
   steps_for_lr: 3000
   learning_rate: 1.0e-3
   tokens:
-    length: 2048
+    len: 2048
     batch: 256
   use_grad_clip: true
   use_gpu: false
@@ -50,4 +50,4 @@ model:
   gamma_hidden: 1.
   gamma_unembed: 1.
 
-checkpoint_interval: 9200
+checkpoint_interval: 92

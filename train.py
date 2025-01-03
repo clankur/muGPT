@@ -504,7 +504,6 @@ class Model:
         k_pos = jnp.arange(L // h.block_size)
         x_causal_mask = q_pos[:, None] // h.block_size >= k_pos[None, :]
         x_causal_mask = x_causal_mask[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
-        # TODO: Do we need to add segment data to other masks???
 
         rope_table = RopeTable.create(L, h)
         concept_rope_table = RopeTable.create(n_blocks, h)

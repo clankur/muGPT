@@ -419,6 +419,9 @@ class Model:
         chunk_indices = jnp.arange(L) // h.block_size
         encoder_mask = chunk_indices[:, None] >= chunk_indices[None, :]
         encoder_mask = encoder_mask[..., None, None]  # Add dims for Q K/t
+        concept_causal_mask = jnp.tril(jnp.ones((n_blocks, n_blocks), dtype=jnp.bool_))[
+            jnp.newaxis, ..., jnp.newaxis, jnp.newaxis
+        ]
         # TODO: add different masks for blocks
         # embedding decoder mask which is tril of (block_size, block_size)
         # decoder mask which is causal mask of (L, L)
@@ -431,13 +434,14 @@ class Model:
         #     - reduce for each chunk BLOCK_SIZE to a single embedding
 
         rope_table = RopeTable.create(L, h)
+        concept_rope_table = RopeTable.create(n_blocks, h)
 
         # Encoder block that processes chunks of input into concept embeddings
         @explicit_activation_checkpointing
         @typechecked
         def encoder_block(
             x: bf16[b"B/d L M/t"], layer_weights: Any
-        ) -> Tuple[bf16[b"B/d L M/t"], Tuple[()]]:
+        ) -> Tuple[bf16[b"B/d n_blocks M/t"], Tuple[()]]:
             w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2 = layer_weights
 
             # Pre-attention RMSNorm
@@ -468,7 +472,7 @@ class Model:
                 1.0 / math.sqrt(h.d_head),
             )
             logits = logit_scale * shardops.einsum_unreduced(
-                "B/d Qlen Q K/t D, B/d Klen K/t D -> B/d Qlen Klen Q K/t",
+                "B/d Qblocks Q K/t D, B/d Kblocks K/t D -> B/d Qblocks Kblocks Q K/t",
                 q,
                 k,
                 preferred_element_type=jnp.float32,
@@ -477,13 +481,17 @@ class Model:
             logits = jnp.where(encoder_mask, logits, -1e10)
             probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
             attn_out = shardops.einsum_unreduced(
-                "B/d Qlen Klen Q K/t, B/d Klen K/t D -> B/d Qlen Q K/t D", probs, v
+                "B/d Qblocks Kblocks Q K/t, B/d Kblocks K/t D -> B/d Qblocks Q K/t D",
+                probs,
+                v,
             )
             w_o = shardops.all_gather("M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_o))
             attn_out = hidden_mult * shardops.einsum_unreduced(
-                "B/d Qlen Q K/t D, M Q K/t D -> B/d Qlen M", attn_out, w_o
+                "B/d Qblocks Q K/t D, M Q K/t D -> B/d Qblocks M", attn_out, w_o
             )
-            attn_out = shardops.psum_scatter("B/d Qlen M -> B/d Qlen M/t", attn_out)
+            attn_out = shardops.psum_scatter(
+                "B/d Qblocks M -> B/d Qblocks M/t", attn_out
+            )
             x = save_for_backward(x + attn_out)
 
             # Pre-FFN RMSNorm
@@ -512,40 +520,38 @@ class Model:
             ffn_out = shardops.psum_scatter("B/d L M -> B/d L M/t", ffn_out)
             x = x + ffn_out
 
-            # reduce for each chunk BLOCK_SIZE to a single embedding
-            # x = einops.reduce(x, "B L M/t -> B n_blocks M", "sum", n_blocks=n_blocks)
-
             return jnp.bfloat16(x), ()
 
         # Concept decoder block
         @explicit_activation_checkpointing
         @typechecked
+        @shardtypes.scope
         def concept_decoder_block(
-            x: bf16[b"B/d L M/t"], layer_weights: Any
-        ) -> Tuple[bf16[b"B/d L M/t"], Tuple[()]]:
+            x: bf16[b"B/d n_blocks M/t"], layer_weights: Any
+        ) -> Tuple[bf16[b"B/d n_blocks M/t"], Tuple[()]]:
             w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2 = layer_weights
 
             # Pre-attention RMSNorm
             ln1 = shardops.all_gather("M/t/d -> M", jnp.float32(ln1))
-            gx = shardops.all_gather("B/d L M/t -> B/d L M", x)
+            gx = shardops.all_gather("B/d n_blocks M/t -> B/d n_blocks M", x)
             nx = jnp.bfloat16(rms_norm(gx) * ln1)
 
-            # Standard decoder attention with causal mask
+            # Standard decoder attention with causal mask for concept embeddings
             w_q = shardops.all_gather("M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_q))
             q = save_for_backward(
                 hidden_mult
                 * shardops.einsum_unreduced(
-                    "B/d L M, M Q K/t D -> B/d L Q K/t D", nx, w_q
+                    "B/d n_blocks M, M Q K/t D -> B/d n_blocks Q K/t D", nx, w_q
                 )
             )
-            q = rope_table.apply("L D -> 1 L 1 1 D", q)
+            q = concept_rope_table.apply("n_blocks D -> 1 n_blocks 1 1 D", q)
             w_kv = shardops.all_gather("2 M/d K/t D -> 2 M K/t D", jnp.bfloat16(w_kv))
             k, v = hidden_mult * shardops.einsum_unreduced(
-                "B/d L M, k_v M K/t D -> k_v B/d L K/t D", nx, w_kv
+                "B/d n_blocks M, k_v M K/t D -> k_v B/d n_blocks K/t D", nx, w_kv
             )
             k = save_for_backward(k)
             v = save_for_backward(v)
-            k = rope_table.apply("L d -> 1 L 1 d", k)
+            k = concept_rope_table.apply("n_blocks d -> 1 n_blocks 1 d", k)
 
             logit_scale = jax.lax.select(
                 h.parameterization.lower() == "mup",
@@ -553,47 +559,58 @@ class Model:
                 1.0 / math.sqrt(h.d_head),
             )
             logits = logit_scale * shardops.einsum_unreduced(
-                "B/d Qlen Q K/t D, B/d Klen K/t D -> B/d Qlen Klen Q K/t",
+                "B/d Qblocks Q K/t D, B/d Kblocks K/t D -> B/d Qblocks Kblocks Q K/t",
                 q,
                 k,
                 preferred_element_type=jnp.float32,
             )
-            logits = jnp.where(causal_mask, logits, -1e10)
+
+            logits = jnp.where(concept_causal_mask, logits, -1e10)
             probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
             attn_out = shardops.einsum_unreduced(
-                "B/d Qlen Klen Q K/t, B/d Klen K/t D -> B/d Qlen Q K/t D", probs, v
+                "B/d Qblocks Kblocks Q K/t, B/d Kblocks K/t D -> B/d Qblocks Q K/t D",
+                probs,
+                v,
             )
             w_o = shardops.all_gather("M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_o))
             attn_out = hidden_mult * shardops.einsum_unreduced(
-                "B/d Qlen Q K/t D, M Q K/t D -> B/d Qlen M", attn_out, w_o
+                "B/d Qblocks Q K/t D, M Q K/t D -> B/d Qblocks M", attn_out, w_o
             )
-            attn_out = shardops.psum_scatter("B/d Qlen M -> B/d Qlen M/t", attn_out)
+            attn_out = shardops.psum_scatter(
+                "B/d Qblocks M -> B/d Qblocks M/t", attn_out
+            )
             x = save_for_backward(x + attn_out)
 
             # Pre-FFN RMSNorm
             ln2 = save_for_backward(shardops.all_gather("M/t/d -> M", jnp.float32(ln2)))
-            gx = shardops.all_gather("B/d L M/t -> B/d L M", x)
+            gx = shardops.all_gather("B/d n_blocks M/t -> B/d n_blocks M", x)
             nx = jnp.bfloat16(rms_norm(gx) * ln2)
 
             # FFN, using SwiGLU
             w_gate = shardops.all_gather("M/d F/t -> M F/t", jnp.bfloat16(w_gate))
             gate_proj = save_for_backward(
                 hidden_mult
-                * shardops.einsum_unreduced("B/d L M, M F/t -> B/d L F/t", nx, w_gate)
+                * shardops.einsum_unreduced(
+                    "B/d n_blocks M, M F/t -> B/d n_blocks F/t", nx, w_gate
+                )
             )
             w_up = shardops.all_gather("M/d F/t -> M F/t", jnp.bfloat16(w_up))
             up_proj = save_for_backward(
                 hidden_mult
-                * shardops.einsum_unreduced("B/d L M, M F/t -> B/d L F/t", nx, w_up)
+                * shardops.einsum_unreduced(
+                    "B/d n_blocks M, M F/t -> B/d n_blocks F/t", nx, w_up
+                )
             )
             y = jax.nn.swish(gate_proj) * up_proj
             w_down = shardops.all_gather("M/d F/t -> M F/t", jnp.bfloat16(w_down))
 
             ffn_out_mult = (h.d_ff / h.base.d_ff) ** -p.hidden_param_mult
             ffn_out = ffn_out_mult * shardops.einsum_unreduced(
-                "B/d L F/t, M F/t -> B/d L M", y, w_down
+                "B/d n_blocks F/t, M F/t -> B/d n_blocks M", y, w_down
             )
-            ffn_out = shardops.psum_scatter("B/d L M -> B/d L M/t", ffn_out)
+            ffn_out = shardops.psum_scatter(
+                "B/d n_blocks M -> B/d n_blocks M/t", ffn_out
+            )
 
             return jnp.bfloat16(x + ffn_out), ()
 
@@ -612,6 +629,14 @@ class Model:
                 self.e_ln2,
             ),
         )
+
+        # reduce for each chunk of block_size to a single embedding
+        x = einops.rearrange(
+            x,
+            "B (n_blocks block_size) M -> B n_blocks block_size M",
+            n_blocks=n_blocks,
+        )
+        x = einops.reduce(x, "B n_blocks block_size M -> B n_blocks M", "sum")
 
         # Process through concept decoder blocks
         x, () = jax.lax.scan(

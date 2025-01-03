@@ -3,6 +3,12 @@ defaults:
   - starcoder_base
   - _self_
 
+training:
+  warmup_steps: 300
+  steps: 3000
+  steps_for_lr: 3000
+  learning_rate: 1.0.e-3
+
 model:
   d_model: 512
   n_q_per_kv: 1
@@ -28,3 +34,4 @@ model:
   gamma_embed: 1.
   gamma_hidden: 1.
   gamma_unembed: 1.
+

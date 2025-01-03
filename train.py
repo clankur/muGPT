@@ -481,7 +481,7 @@ class Model:
             jnp.ones((L, L), dtype=jnp.bool_), 0
         )[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
         chunk_indices = jnp.arange(L) // h.block_size
-        encoder_mask = chunk_indices[:, None] >= chunk_indices[None, :]
+        encoder_mask = chunk_indices[:, None] > chunk_indices[None, :]
         encoder_mask = encoder_mask[..., jnp.newaxis, jnp.newaxis]
         concept_causal_mask = jnp.tril(jnp.ones((n_blocks, n_blocks), dtype=jnp.bool_))[
             jnp.newaxis, ..., jnp.newaxis, jnp.newaxis

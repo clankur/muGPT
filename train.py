@@ -485,16 +485,19 @@ class Model:
         causal_mask: bool_[b"1 L L 1 1"] = jnp.tril(
             jnp.ones((L, L), dtype=jnp.bool_), 0
         )[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
-        causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
         chunk_indices = jnp.arange(L) // h.block_size
-        encoder_mask = chunk_indices[:, None] >= chunk_indices[None, :]
-        encoder_mask = encoder_mask[..., None, None]  # Add dims for Q K/t
+        encoder_mask = (
+            chunk_indices[:, None]
+            >= chunk_indices[None, :][..., jnp.newaxis, jnp.newaxis]
+        )
         concept_causal_mask = jnp.tril(jnp.ones((n_blocks, n_blocks), dtype=jnp.bool_))[
             jnp.newaxis, ..., jnp.newaxis, jnp.newaxis
         ]
-        # TODO: add different masks for blocks
-        # embedding decoder mask which is tril of (block_size, block_size)
-        # decoder mask which is causal mask of (L, L)
+        causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
+        # TODO: Do we need to add segment data to other masks???
+
+        rope_table = RopeTable.create(L, h)
+        concept_rope_table = RopeTable.create(n_blocks, h)
 
         # Encoder block
         #  need weights for e_w_q, e_w_kv, e_w_o, e_w_gate, e_w_up, e_w_down, e_ln1, e_ln2
@@ -503,10 +506,6 @@ class Model:
         #     - perform standard attention on the chunks with this mask
         #     - reduce for each chunk BLOCK_SIZE to a single embedding
 
-        rope_table = RopeTable.create(L, h)
-        concept_rope_table = RopeTable.create(n_blocks, h)
-
-        # Encoder block
         @explicit_activation_checkpointing
         @typechecked
         def encoder_block(
@@ -841,6 +840,7 @@ class Model:
             "B (n_blocks block_size) M -> B n_blocks block_size M",
             n_blocks=n_blocks,
         )
+        # TODO: investigate other reduction methods: mix through matmul/cnn, max/min
         x = einops.reduce(x, "B n_blocks block_size M -> B n_blocks M", "sum")
 
         # Process through concept decoder blocks
@@ -1149,7 +1149,6 @@ def training_step(
             e_w_gate=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
             e_w_up=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
             e_w_down=h.gamma_hidden * (h.d_ff / base.d_ff) ** -p.hidden_lr,
-
             # Token decoder lr scales
             t_ln1=1.0,
             t_ln2=1.0,
@@ -1159,7 +1158,6 @@ def training_step(
             t_w_gate=1.0,
             t_w_up=1.0,
             t_w_down=1.0,
-
             # Cross attention lr scales
             x_w_q=1.0,
             x_w_kv=1.0,

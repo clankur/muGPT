@@ -254,6 +254,27 @@ class Model:
     e_w_up: f32["n_e_layers d_model/d d_ff/t"]
     e_w_down: f32["n_e_layers d_model/d d_ff/t"]
 
+    # New token decoder weights
+    t_ln1: f32["layers d_model/t/d"]
+    t_ln2: f32["layers d_model/t/d"]
+    t_w_q: f32["layers d_model/d n_q_per_kv n_kv/t d_head"]
+    t_w_kv: f32["layers 2 d_model/d n_kv/t d_head"]
+    t_w_o: f32["layers d_model/d n_q_per_kv n_kv/t d_head"]
+    t_w_gate: f32["layers d_model/d d_ff/t"]
+    t_w_up: f32["layers d_model/d d_ff/t"]
+    t_w_down: f32["layers d_model/d d_ff/t"]
+
+    # Cross attention weights for token decoder
+    x_w_q: f32[
+        "layers d_model/d n_q_per_kv n_kv/t d_head"
+    ]  # Query weights for cross attention
+    x_w_kv: f32[
+        "layers 2 d_model/d n_kv/t d_head"
+    ]  # Key/value weights for cross attention
+    x_w_o: f32[
+        "layers d_model/d n_q_per_kv n_kv/t d_head"
+    ]  # Output weights for cross attention
+
     @staticmethod
     @typechecked
     def init(h: Hparams, rng: PRNGKey) -> "Model":
@@ -361,6 +382,44 @@ class Model:
             fold_in_str(rng, "e_w_down"), -2, 2, e_ff_shape, dtype=jnp.float32
         )
 
+        # Initialize token decoder weights with layers dimension
+        t_ln1 = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
+        t_ln2 = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
+
+        t_w_q_shape = (h.layers, h.d_model, h.n_q_per_kv, h.n_kv, h.d_head)
+        t_w_kv_shape = (h.layers, 2, h.d_model, h.n_kv, h.d_head)
+        t_ff_shape = (h.layers, h.d_model, h.d_ff)
+
+        t_w_q = w_q_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "t_w_q"), -2, 2, t_w_q_shape, dtype=jnp.float32
+        )
+        t_w_kv = w_kv_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "t_w_kv"), -2, 2, t_w_kv_shape, dtype=jnp.float32
+        )
+        t_w_o = w_o_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "t_w_o"), -2, 2, t_w_q_shape, dtype=jnp.float32
+        )
+        t_w_gate = w_up_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "t_w_gate"), -2, 2, t_ff_shape, dtype=jnp.float32
+        )
+        t_w_up = w_up_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "t_w_up"), -2, 2, t_ff_shape, dtype=jnp.float32
+        )
+        t_w_down = w_down_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "t_w_down"), -2, 2, t_ff_shape, dtype=jnp.float32
+        )
+
+        # Initialize cross attention weights for token decoder
+        x_w_q = w_q_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "x_w_q"), -2, 2, t_w_q_shape, dtype=jnp.float32
+        )
+        x_w_kv = w_kv_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "x_w_kv"), -2, 2, t_w_kv_shape, dtype=jnp.float32
+        )
+        x_w_o = w_o_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "x_w_o"), -2, 2, t_w_q_shape, dtype=jnp.float32
+        )
+
         arrays = Model(
             embed=embed,
             unembed=unembed,
@@ -381,6 +440,17 @@ class Model:
             e_w_gate=e_w_gate,
             e_w_up=e_w_up,
             e_w_down=e_w_down,
+            t_ln1=t_ln1,
+            t_ln2=t_ln2,
+            t_w_q=t_w_q,
+            t_w_kv=t_w_kv,
+            t_w_o=t_w_o,
+            t_w_gate=t_w_gate,
+            t_w_up=t_w_up,
+            t_w_down=t_w_down,
+            x_w_q=x_w_q,
+            x_w_kv=x_w_kv,
+            x_w_o=x_w_o,
         )
         shardings = make_shardings(Model)
         return jax.tree.map(lax.with_sharding_constraint, arrays, shardings)
@@ -401,7 +471,7 @@ class Model:
         one_hot_ids = jax.nn.one_hot(ids, self.embed.shape[0])
         x = shardops.einsum_unreduced("B/d L V/t, V/t M -> B/d L M", one_hot_ids, embed)
 
-        x = shardops.psum_scatter("B/d L M -> B/d L M/t", x)
+        embed_x = x = shardops.psum_scatter("B/d L M -> B/d L M/t", x)
 
         L = ids.shape[1]
         n_blocks = L // h.block_size
@@ -436,7 +506,7 @@ class Model:
         rope_table = RopeTable.create(L, h)
         concept_rope_table = RopeTable.create(n_blocks, h)
 
-        # Encoder block that processes chunks of input into concept embeddings
+        # Encoder block
         @explicit_activation_checkpointing
         @typechecked
         def encoder_block(
@@ -614,6 +684,141 @@ class Model:
 
             return jnp.bfloat16(x + ffn_out), ()
 
+        # Token decoder
+        #  3. Token Decoder that decodes concept embedding to get the output tokens
+        #     - Input: output concept embedding (z) from CausalEmbedding, Mask enabling attending to previous tokens
+        #     - get tokenized embeddings, apply standard attention on them, get out, use x = x + out
+        #     - apply cross attention
+        #           - apply x_wq to x to get queries, apply x_wkv to z get keys and values
+        #           - standard decoder after this with MLP
+        #     - each embedding gets mapped back to a BLOCK_SIZE and we join them to form the sequence?
+
+        # Token decoder block
+        @explicit_activation_checkpointing
+        @typechecked
+        @shardtypes.scope
+        def token_decoder_block(
+            carry: Tuple[bf16[b"B/d L M/t"], bf16[b"B/d n_blocks M/t"]],
+            layer_weights: Any,
+        ) -> Tuple[Tuple[bf16[b"B/d L M/t"], bf16[b"B/d n_blocks M/t"]], Tuple[()]]:
+            x, z = carry
+            w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2, x_w_q, x_w_kv, x_w_o = (
+                layer_weights
+            )
+
+            # Pre-attention RMSNorm
+            ln1 = shardops.all_gather("M/t/d -> M", jnp.float32(ln1))
+            gx = shardops.all_gather("B/d L M/t -> B/d L M", x)
+            nx = jnp.bfloat16(rms_norm(gx) * ln1)
+
+            # Self attention with causal mask
+            w_q = shardops.all_gather("M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_q))
+            q = save_for_backward(
+                hidden_mult
+                * shardops.einsum_unreduced(
+                    "B/d L M, M Q K/t D -> B/d L Q K/t D", nx, w_q
+                )
+            )
+            q = rope_table.apply("L D -> 1 L 1 1 D", q)
+            w_kv = shardops.all_gather("2 M/d K/t D -> 2 M K/t D", jnp.bfloat16(w_kv))
+            k, v = hidden_mult * shardops.einsum_unreduced(
+                "B/d L M, k_v M K/t D -> k_v B/d L K/t D", nx, w_kv
+            )
+            k = save_for_backward(k)
+            v = save_for_backward(v)
+            k = rope_table.apply("L d -> 1 L 1 d", k)
+
+            logit_scale = jax.lax.select(
+                h.parameterization.lower() == "mup",
+                h.a_attn * math.sqrt(h.base.d_head) / h.d_head,
+                1.0 / math.sqrt(h.d_head),
+            )
+            logits = logit_scale * shardops.einsum_unreduced(
+                "B/d Qlen Q K/t D, B/d Klen K/t D -> B/d Qlen Klen Q K/t",
+                q,
+                k,
+                preferred_element_type=jnp.float32,
+            )
+
+            logits = jnp.where(causal_mask, logits, -1e10)
+            probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
+            attn_out = shardops.einsum_unreduced(
+                "B/d Qlen Klen Q K/t, B/d Klen K/t D -> B/d Qlen Q K/t D", probs, v
+            )
+            w_o = shardops.all_gather("M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_o))
+            attn_out = hidden_mult * shardops.einsum_unreduced(
+                "B/d L Q K/t D, M Q K/t D -> B/d L M", attn_out, w_o
+            )
+            attn_out = shardops.psum_scatter("B/d L M -> B/d L M/t", attn_out)
+            x = save_for_backward(x + attn_out)
+
+            # Cross attention with concept embeddings z
+            # Use x as queries and z as keys/values with separate weights
+            x_w_q = shardops.all_gather("M/d Q K/t D -> M Q K/t D", jnp.bfloat16(x_w_q))
+            q = save_for_backward(
+                hidden_mult
+                * shardops.einsum_unreduced(
+                    "B/d L M, M Q K/t D -> B/d L Q K/t D", nx, x_w_q
+                )
+            )
+            x_w_kv = shardops.all_gather(
+                "2 M/d K/t D -> 2 M K/t D", jnp.bfloat16(x_w_kv)
+            )
+
+            gz = shardops.all_gather("B/d n_blocks M/t -> B/d n_blocks M", z)
+            k, v = hidden_mult * shardops.einsum_unreduced(
+                "B/d n_blocks M, k_v M K/t D -> k_v B/d n_blocks K/t D", gz, x_w_kv
+            )
+            k = save_for_backward(k)
+            v = save_for_backward(v)
+
+            logits = logit_scale * shardops.einsum_unreduced(
+                "B/d L Q K/t D, B/d n_blocks K/t D -> B/d L n_blocks Q K/t",
+                q,
+                k,
+                preferred_element_type=jnp.float32,
+            )
+
+            probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
+            attn_out = shardops.einsum_unreduced(
+                "B/d L n_blocks Q K/t, B/d n_blocks K/t D -> B/d L Q K/t D",
+                probs,
+                v,
+            )
+            x_w_o = shardops.all_gather("M/d Q K/t D -> M Q K/t D", jnp.bfloat16(x_w_o))
+            attn_out = hidden_mult * shardops.einsum_unreduced(
+                "B/d L Q K/t D, M Q K/t D -> B/d L M", attn_out, x_w_o
+            )
+            attn_out = shardops.psum_scatter("B/d L M -> B/d L M/t", attn_out)
+            x = save_for_backward(x + attn_out)
+
+            # Pre-FFN RMSNorm
+            ln2 = save_for_backward(shardops.all_gather("M/t/d -> M", jnp.float32(ln2)))
+            gx = shardops.all_gather("B/d L M/t -> B/d L M", x)
+            nx = jnp.bfloat16(rms_norm(gx) * ln2)
+
+            # FFN, using SwiGLU
+            w_gate = shardops.all_gather("M/d F/t -> M F/t", jnp.bfloat16(w_gate))
+            gate_proj = save_for_backward(
+                hidden_mult
+                * shardops.einsum_unreduced("B/d L M, M F/t -> B/d L F/t", nx, w_gate)
+            )
+            w_up = shardops.all_gather("M/d F/t -> M F/t", jnp.bfloat16(w_up))
+            up_proj = save_for_backward(
+                hidden_mult
+                * shardops.einsum_unreduced("B/d L M, M F/t -> B/d L F/t", nx, w_up)
+            )
+            y = jax.nn.swish(gate_proj) * up_proj
+            w_down = shardops.all_gather("M/d F/t -> M F/t", jnp.bfloat16(w_down))
+
+            ffn_out_mult = (h.d_ff / h.base.d_ff) ** -p.hidden_param_mult
+            ffn_out = ffn_out_mult * shardops.einsum_unreduced(
+                "B/d L F/t, M F/t -> B/d L M", y, w_down
+            )
+            ffn_out = shardops.psum_scatter("B/d L M -> B/d L M/t", ffn_out)
+
+            return (jnp.bfloat16(x + ffn_out), z), ()
+
         # Process input through encoder blocks
         x, () = jax.lax.scan(
             encoder_block,
@@ -654,14 +859,30 @@ class Model:
             ),
         )
 
-        # Token decoder
-        #  3. Token Decoder that decodes concept embedding to get the output tokens
-        #     - Input: output concept embedding (z) from CausalEmbedding, Mask enabling attending to previous tokens
-        #     - get tokenized embeddings, apply standard attention on them, get out, use x = x + out
-        #     - apply cross attention
-        #           - apply x_wq to x to get queries, apply x_wkv to z get keys and values
-        #           - standard decoder after this with MLP
-        #     - each embedding gets mapped back to a BLOCK_SIZE and we join them to form the sequence?
+        # Process through token decoder blocks
+        x = einops.repeat(
+            x, "B n_blocks M -> B (n_blocks block_size) M", block_size=h.block_size
+        )
+        (x, _), () = jax.lax.scan(
+            token_decoder_block,
+            (
+                jnp.bfloat16(embed_x),
+                jnp.bfloat16(x),
+            ),  # Pass both token embeddings and concept embeddings
+            (
+                self.t_w_q,
+                self.t_w_kv,
+                self.t_w_o,
+                self.t_w_gate,
+                self.t_w_up,
+                self.t_w_down,
+                self.t_ln1,
+                self.t_ln2,
+                self.x_w_q,
+                self.x_w_kv,
+                self.x_w_o,
+            ),
+        )
 
         # Final layernorm and output projection.
         x = shardops.all_gather("B/d L M/t -> B/d L M", x)
@@ -928,6 +1149,21 @@ def training_step(
             e_w_gate=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
             e_w_up=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
             e_w_down=h.gamma_hidden * (h.d_ff / base.d_ff) ** -p.hidden_lr,
+
+            # Token decoder lr scales
+            t_ln1=1.0,
+            t_ln2=1.0,
+            t_w_q=1.0,
+            t_w_kv=1.0,
+            t_w_o=1.0,
+            t_w_gate=1.0,
+            t_w_up=1.0,
+            t_w_down=1.0,
+
+            # Cross attention lr scales
+            x_w_q=1.0,
+            x_w_kv=1.0,
+            x_w_o=1.0,
         )
 
         if hparams.use_grad_clip:

@@ -54,18 +54,18 @@ PRNGKey = Any
 @dataclass(frozen=True)
 class BaseWidths:
     d_model: int
-    n_q_per_kv: int
-    n_kv: int
+    n_h: int
     d_head: int
+    d_compressed: int
     d_ff: int
 
 
 @dataclass(frozen=True)
 class Hparams:
     d_model: int
-    n_q_per_kv: int
-    n_kv: int
+    n_h: int
     d_head: int
+    d_compressed: int
     vocab: int
     d_ff: int
     layers: int
@@ -224,9 +224,14 @@ class Model:
     unembed: f32["vocab/t d_model/d"]
     ln1: f32["layers d_model/t/d"]
     ln2: f32["layers d_model/t/d"]
-    w_q: f32["layers d_model/d n_q_per_kv n_kv/t d_head"]
-    w_kv: f32["layers 2 d_model/d n_kv/t d_head"]
-    w_o: f32["layers d_model/d n_q_per_kv n_kv/t d_head"]
+    ln_compressed: f32["layers d_compressed/t/d"]
+    w_q_pe: f32["layers d_model/d n_h/t d_head_half"]
+    w_q_nope: f32["layers d_model/d n_h/t d_head_half"]
+    w_k_pe: f32["layers d_model/d/t d_head_half"]
+    w_k_compressed: f32["layers d_model/d/t d_compressed"]
+    w_k_nope: f32["layers d_compressed/d n_h/t d_head_half"]
+    w_v: f32["layers d_model/d n_h/t d_head"]
+    w_o: f32["layers d_model/d n_h/t d_head"]
     w_gate: f32["layers d_model/d d_ff/t"]
     w_up: f32["layers d_model/d d_ff/t"]
     w_down: f32["layers d_model/d d_ff/t"]
@@ -254,20 +259,15 @@ class Model:
         d_model_scale = (
             math.sqrt(base.d_model) / (h.d_model * truncated_normal_stddev)
         ) ** (p.hidden_init_var)
-        w_kv_scale = d_model_scale
-        target_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
-        base_head_dim = base.n_q_per_kv * base.n_kv * base.d_head
+
+        target_head_dim = h.n_h * h.d_head
+        base_head_dim = base.n_h * base.d_head
         w_o_scale = (
             math.sqrt(base_head_dim) / (target_head_dim * truncated_normal_stddev)
         ) ** (p.hidden_init_var)
         w_up_scale = d_model_scale
         w_down_scale = (math.sqrt(base.d_ff) / (h.d_ff * truncated_normal_stddev)) ** (
             p.hidden_init_var
-        )
-
-        w_kv_shape = (h.layers, 2, h.d_model, h.n_kv, h.d_head)
-        w_kv = w_kv_scale * jax.random.truncated_normal(
-            fold_in_str(rng, "w_kv"), -2, 2, w_kv_shape, dtype=jnp.float32
         )
 
         ff_shape = (h.layers, h.d_model, h.d_ff)
@@ -285,7 +285,7 @@ class Model:
         )
 
         w_q_scale = d_model_scale
-        w_q_shape = (h.layers, h.d_model, h.n_q_per_kv, h.n_kv, h.d_head)
+        w_q_shape = (h.layers, h.d_model, h.n_h, h.d_head)
         w_o_shape = w_q_shape
         unembed_scale = (
             math.sqrt(base.d_model) / (h.d_model * truncated_normal_stddev)
@@ -294,11 +294,20 @@ class Model:
             fold_in_str(rng, "w_o"), -2, 2, w_o_shape, dtype=jnp.float32
         )
 
+        # Split query projection into PE and non-PE components
+        d_head_half = h.d_head // 2
+        w_q_pe_shape = (h.layers, h.d_model, h.n_h, d_head_half)
+        w_q_nope_shape = w_q_pe_shape
+
         if h.zero_queries:
-            w_q = jnp.zeros(w_q_shape, dtype=jnp.float32)
+            w_q_pe = jnp.zeros(w_q_pe_shape, dtype=jnp.float32)
+            w_q_nope = jnp.zeros(w_q_nope_shape, dtype=jnp.float32)
         else:
-            w_q = w_q_scale * jax.random.truncated_normal(
-                fold_in_str(rng, "w_q"), -2, 2, w_q_shape, dtype=jnp.float32
+            w_q_pe = w_q_scale * jax.random.truncated_normal(
+                fold_in_str(rng, "w_q_pe"), -2, 2, w_q_pe_shape, dtype=jnp.float32
+            )
+            w_q_nope = w_q_scale * jax.random.truncated_normal(
+                fold_in_str(rng, "w_q_nope"), -2, 2, w_q_nope_shape, dtype=jnp.float32
             )
 
         if h.zero_unembed:
@@ -311,13 +320,60 @@ class Model:
                 (h.vocab, h.d_model),
                 dtype=jnp.float32,
             )
+
+        # Split w_kv into separate k_pe, k_compressed, k_nope, and v projections
+        d_head_half = h.d_head // 2
+        w_kv_scale = d_model_scale
+        d_compressed_scale = math.sqrt(base.d_compressed) / (
+            h.d_compressed * truncated_normal_stddev
+        ) ** (p.hidden_init_var)
+        w_k_pe_shape = (h.layers, h.d_model, d_head_half)
+        w_k_compressed_shape = (
+            h.layers,
+            h.d_model,
+            h.d_compressed,
+        )
+        w_k_nope_shape = (
+            h.layers,
+            h.d_compressed,
+            h.n_h,
+            d_head_half,
+        )
+        w_k_pe = w_kv_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "w_k_pe"), -2, 2, w_k_pe_shape, dtype=jnp.float32
+        )
+        w_k_compressed = w_kv_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "w_k_compressed"),
+            -2,
+            2,
+            w_k_compressed_shape,
+            dtype=jnp.float32,
+        )
+        w_k_nope = d_compressed_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "w_k_nope"), -2, 2, w_k_nope_shape, dtype=jnp.float32
+        )
+        w_v = w_kv_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "w_v"),
+            -2,
+            2,
+            (h.layers, h.d_model, h.n_h, h.d_head),
+            dtype=jnp.float32,
+        )
+
+        ln_compressed = jnp.ones((h.layers, h.d_compressed), dtype=jnp.float32)
+
         arrays = Model(
             embed=embed,
             unembed=unembed,
             ln1=ln1,
             ln2=ln2,
-            w_q=w_q,
-            w_kv=w_kv,
+            ln_compressed=ln_compressed,
+            w_q_pe=w_q_pe,
+            w_q_nope=w_q_nope,
+            w_k_pe=w_k_pe,
+            w_k_compressed=w_k_compressed,
+            w_k_nope=w_k_nope,
+            w_v=w_v,
             w_o=w_o,
             w_gate=w_gate,
             w_up=w_up,
@@ -350,13 +406,13 @@ class Model:
         segment_mask: bool_[b"B/d L L"] = (
             segment_ids[:, :, jnp.newaxis] == segment_ids[:, jnp.newaxis, :]
         )
-        segment_mask: bool_[b"B/d L L 1 1"] = segment_mask[
-            ..., jnp.newaxis, jnp.newaxis
-        ]  # add axes for q_per_k, num_kv_heads dimensions
-        causal_mask: bool_[b"1 L L 1 1"] = jnp.tril(
-            jnp.ones((L, L), dtype=jnp.bool_), 0
-        )[jnp.newaxis, ..., jnp.newaxis, jnp.newaxis]
-        causal_mask: bool_[b"B/d L L 1 1"] = jnp.logical_and(segment_mask, causal_mask)
+        segment_mask: bool_[b"B/d L L 1"] = segment_mask[
+            ..., jnp.newaxis
+        ]  # add axis for heads dimension
+        causal_mask: bool_[b"1 L L 1"] = jnp.tril(jnp.ones((L, L), dtype=jnp.bool_), 0)[
+            jnp.newaxis, ..., jnp.newaxis
+        ]
+        causal_mask: bool_[b"B/d L L 1"] = jnp.logical_and(segment_mask, causal_mask)
 
         rope_table = RopeTable.create(L, h)
 
@@ -366,29 +422,92 @@ class Model:
         def loop_body(
             x: bf16[b"B/d L M/t"], layer_weights: Any
         ) -> Tuple[bf16[b"B/d L M/t"], Tuple[()]]:
-            w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2 = layer_weights
+            (
+                w_q_pe,
+                w_q_nope,
+                w_k_pe,
+                w_k_compressed,
+                w_k_nope,
+                w_v,
+                w_o,
+                w_gate,
+                w_up,
+                w_down,
+                ln1,
+                ln2,
+                ln_compressed,
+            ) = layer_weights
 
             # Pre-attention RMSNorm
             ln1 = shardops.all_gather("M/t/d -> M", jnp.float32(ln1))
             gx = shardops.all_gather("B/d L M/t -> B/d L M", x)
             nx = jnp.bfloat16(rms_norm(gx) * ln1)
 
-            # Attention, using Grouped Query Attention and RoPE position embeddings.
-            w_q = shardops.all_gather("M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_q))
-            q = save_for_backward(
+            # Split query into PE and non-PE components
+            w_q_pe = shardops.all_gather(
+                "M/d H/t half_D -> M H/t half_D", jnp.bfloat16(w_q_pe)
+            )
+            w_q_nope = shardops.all_gather(
+                "M/d H/t half_D -> M H/t half_D", jnp.bfloat16(w_q_nope)
+            )
+
+            q_pe = save_for_backward(
                 hidden_mult
                 * shardops.einsum_unreduced(
-                    "B/d L M, M Q K/t D -> B/d L Q K/t D", nx, w_q
+                    "B/d L M, M H/t half_D -> B/d L H/t half_D", nx, w_q_pe
                 )
             )
-            q = rope_table.apply("L D -> 1 L 1 1 D", q)
-            w_kv = shardops.all_gather("2 M/d K/t D -> 2 M K/t D", jnp.bfloat16(w_kv))
-            k, v = hidden_mult * shardops.einsum_unreduced(
-                "B/d L M, k_v M K/t D -> k_v B/d L K/t D", nx, w_kv
+            q_pe = rope_table.apply("L half_D -> 1 L 1 half_D", q_pe)
+
+            q_nope = save_for_backward(
+                hidden_mult
+                * shardops.einsum_unreduced(
+                    "B/d L M, M H/t half_D -> B/d L H/t half_D", nx, w_q_nope
+                )
             )
-            k = save_for_backward(k)
+
+            q = jnp.concatenate([q_pe, q_nope], axis=-1)
+
+            w_k_compressed = shardops.all_gather(
+                "M/d/t C -> M C", jnp.bfloat16(w_k_compressed)
+            )
+            k_compressed = hidden_mult * shardops.einsum_unreduced(
+                "B/d L M, M C -> B/d L C", nx, w_k_compressed
+            )
+            k_compressed = save_for_backward(k_compressed)
+
+            ln_compressed = shardops.all_gather(
+                "C/t/d -> C", jnp.float32(ln_compressed)
+            )
+            n_k_compressed = jnp.bfloat16(rms_norm(k_compressed) * ln_compressed)
+
+            w_k_nope = shardops.all_gather(
+                "C/d H/t half_D -> C H/t half_D", jnp.bfloat16(w_k_nope)
+            )
+            k_nope = hidden_mult * shardops.einsum_unreduced(
+                "B/d L C, C H/t half_D -> B/d L H/t half_D", n_k_compressed, w_k_nope
+            )
+
+            k_nope = save_for_backward(k_nope)
+
+            w_k_pe = shardops.all_gather(
+                "M/d/t half_D -> M half_D", jnp.bfloat16(w_k_pe)
+            )
+            k_pe = hidden_mult * shardops.einsum_unreduced(
+                "B/d L M, M half_D -> B/d L half_D", nx, w_k_pe
+            )
+            k_pe = einops.rearrange(k_pe, "B L half_D -> B L 1 half_D")
+            k_pe = save_for_backward(rope_table.apply("L half_D -> 1 L 1 half_D", k_pe))
+            local_h = k_nope.shape[2]
+            k_pe = einops.repeat(k_pe, "B L 1 half_D -> B L H half_D", H=local_h)
+
+            k = jnp.concatenate([k_pe, k_nope], axis=-1)
+
+            w_v = shardops.all_gather("M/d K/t D -> M K/t D", jnp.bfloat16(w_v))
+            v = hidden_mult * shardops.einsum_unreduced(
+                "B/d L M, M H/t D -> B/d L H/t D", nx, w_v
+            )
             v = save_for_backward(v)
-            k = rope_table.apply("L d -> 1 L 1 d", k)
 
             logit_scale = jax.lax.select(
                 h.parameterization.lower() == "mup",
@@ -396,7 +515,7 @@ class Model:
                 1.0 / math.sqrt(h.d_head),
             )
             logits = logit_scale * shardops.einsum_unreduced(
-                "B/d Qlen Q K/t D, B/d Klen K/t D -> B/d Qlen Klen Q K/t",
+                "B/d Qlen H/t D, B/d Klen H/t D -> B/d Qlen Klen H/t",
                 q,
                 k,
                 preferred_element_type=jnp.float32,
@@ -404,11 +523,11 @@ class Model:
             logits = jnp.where(causal_mask, logits, -1e10)
             probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
             attn_out = shardops.einsum_unreduced(
-                "B/d Qlen Klen Q K/t, B/d Klen K/t D -> B/d Qlen Q K/t D", probs, v
+                "B/d Qlen Klen H/t, B/d Klen H/t D -> B/d Qlen H/t D", probs, v
             )
-            w_o = shardops.all_gather("M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_o))
+            w_o = shardops.all_gather("M/d H/t D -> M H/t D", jnp.bfloat16(w_o))
             attn_out = hidden_mult * shardops.einsum_unreduced(
-                "B/d Qlen Q K/t D, M Q K/t D -> B/d Qlen M", attn_out, w_o
+                "B/d Qlen H/t D, M H/t D -> B/d Qlen M", attn_out, w_o
             )
             attn_out = shardops.psum_scatter("B/d Qlen M -> B/d Qlen M/t", attn_out)
             x = save_for_backward(x + attn_out)
@@ -444,14 +563,19 @@ class Model:
             loop_body,
             jnp.bfloat16(x),
             (
-                self.w_q,
-                self.w_kv,
+                self.w_q_pe,
+                self.w_q_nope,
+                self.w_k_pe,
+                self.w_k_compressed,
+                self.w_k_nope,
+                self.w_v,
                 self.w_o,
                 self.w_gate,
                 self.w_up,
                 self.w_down,
                 self.ln1,
                 self.ln2,
+                self.ln_compressed,
             ),
         )
 
@@ -564,8 +688,8 @@ class RopeTable:
     @staticmethod
     def create(max_len: int, hparams: Hparams) -> "RopeTable":
         rope_max_timescale = hparams.rope_max_timescale
-        d_head = hparams.d_head
-        d = d_head // 2
+        d_head_half = hparams.d_head // 2
+        d = d_head_half // 2
         # endpoint=False is equivalent to what MaxText does. endpoint=True would be more natural, though.
         timescale = jnp.logspace(
             0, jnp.log10(jnp.float32(rope_max_timescale)), d, endpoint=False
@@ -586,7 +710,9 @@ class RopeTable:
 
 
 @typechecked
-def rms_norm(x: bf16[b"batch/d len M"]) -> bf16[b"batch/d len M"]:
+def rms_norm(
+    x: Union[bf16[b"batch/d len M"], bf16[b"batch/d len d_compressed"]]
+) -> Union[bf16[b"batch/d len M"], bf16[b"batch/d len d_compressed"]]:
     mean2 = save_for_backward(
         jnp.mean(jax.lax.square(jnp.float32(x)), axis=-1, keepdims=True)
     )
@@ -694,8 +820,8 @@ def training_step(
         base = h.base
 
         p = get_parameterization(h.parameterization)
-        target_head_dim = h.n_q_per_kv * h.n_kv * h.d_head
-        base_head_dim = base.n_q_per_kv * base.n_kv * base.d_head
+        target_head_dim = h.n_h * h.d_head
+        base_head_dim = base.n_h * base.d_head
 
         embed_lr_scale = h.gamma_embed * (h.d_model / base.d_model) ** -p.embed_lr
         unembed_lr_scale = h.gamma_unembed * (h.d_model / base.d_model) ** -p.unembed_lr
@@ -705,8 +831,14 @@ def training_step(
             unembed=unembed_lr_scale,
             ln1=1.0,
             ln2=1.0,
-            w_q=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
-            w_kv=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
+            ln_compressed=1.0,
+            w_q_pe=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
+            w_q_nope=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
+            w_k_pe=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
+            w_k_compressed=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
+            w_k_nope=h.gamma_hidden
+            * (h.d_compressed / base.d_compressed) ** -p.hidden_lr,
+            w_v=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
             w_o=h.gamma_hidden * (target_head_dim / base_head_dim) ** -p.hidden_lr,
             w_gate=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,
             w_up=h.gamma_hidden * (h.d_model / base.d_model) ** -p.hidden_lr,

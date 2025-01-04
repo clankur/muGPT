@@ -98,6 +98,7 @@ class Hparams:
     gamma_embed: float
     gamma_hidden: float
     gamma_unembed: float
+    reduction_strategy: str
 
 
 def get_parameterization(style: str, fully_aligned: bool = True):
@@ -277,6 +278,8 @@ class Model:
     x_lnx: f32["layers d_model/t/d"]
     x_lnz: f32["layers d_model/t/d"]
 
+    w_reduce_q: f32["block_size/t/d 1"]
+
     @staticmethod
     @typechecked
     def init(h: Hparams, rng: PRNGKey) -> "Model":
@@ -426,6 +429,11 @@ class Model:
         x_lnx = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
         x_lnz = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
 
+        # Initialize reduction weights
+        w_reduce_q = w_q_scale * jax.random.truncated_normal(
+            fold_in_str(rng, "w_reduce_q"), -2, 2, (h.block_size, 1), dtype=jnp.float32
+        )
+
         arrays = Model(
             embed=embed,
             unembed=unembed,
@@ -459,6 +467,7 @@ class Model:
             x_w_o=x_w_o,
             x_lnx=x_lnx,
             x_lnz=x_lnz,
+            w_reduce_q=w_reduce_q,
         )
         shardings = make_shardings(Model)
         return jax.tree.map(lax.with_sharding_constraint, arrays, shardings)
@@ -519,7 +528,7 @@ class Model:
         @typechecked
         def encoder_block(
             x: bf16[b"B/d L M/t"], layer_weights: Any
-        ) -> Tuple[bf16[b"B/d n_blocks M/t"], Tuple[()]]:
+        ) -> Tuple[bf16[b"B/d L M/t"], Tuple[()]]:
             w_q, w_kv, w_o, w_gate, w_up, w_down, ln1, ln2 = layer_weights
 
             # Pre-attention RMSNorm
@@ -550,7 +559,7 @@ class Model:
                 1.0 / math.sqrt(h.d_head),
             )
             logits = logit_scale * shardops.einsum_unreduced(
-                "B/d Qblocks Q K/t D, B/d Kblocks K/t D -> B/d Qblocks Kblocks Q K/t",
+                "B/d Qlen Q K/t D, B/d Klen K/t D -> B/d Qlen Klen Q K/t",
                 q,
                 k,
                 preferred_element_type=jnp.float32,
@@ -559,17 +568,15 @@ class Model:
             logits = jnp.where(encoder_mask, logits, -1e10)
             probs = jnp.bfloat16(jax.nn.softmax(logits, axis=2))
             attn_out = shardops.einsum_unreduced(
-                "B/d Qblocks Kblocks Q K/t, B/d Kblocks K/t D -> B/d Qblocks Q K/t D",
+                "B/d Qlen Klen Q K/t, B/d Klen K/t D -> B/d Qlen Q K/t D",
                 probs,
                 v,
             )
             w_o = shardops.all_gather("M/d Q K/t D -> M Q K/t D", jnp.bfloat16(w_o))
             attn_out = hidden_mult * shardops.einsum_unreduced(
-                "B/d Qblocks Q K/t D, M Q K/t D -> B/d Qblocks M", attn_out, w_o
+                "B/d Qlen Q K/t D, M Q K/t D -> B/d Qlen M", attn_out, w_o
             )
-            attn_out = shardops.psum_scatter(
-                "B/d Qblocks M -> B/d Qblocks M/t", attn_out
-            )
+            attn_out = shardops.psum_scatter("B/d Qlen M -> B/d Qlen M/t", attn_out)
             x = save_for_backward(x + attn_out)
 
             # Pre-FFN RMSNorm
@@ -603,7 +610,6 @@ class Model:
         # Concept decoder block
         @explicit_activation_checkpointing
         @typechecked
-        @shardtypes.scope
         def concept_decoder_block(
             x: bf16[b"B/d n_blocks M/t"], layer_weights: Any
         ) -> Tuple[bf16[b"B/d n_blocks M/t"], Tuple[()]]:
@@ -704,7 +710,6 @@ class Model:
         # Token decoder block
         @explicit_activation_checkpointing
         @typechecked
-        @shardtypes.scope
         def token_decoder_block(
             carry: Tuple[bf16[b"B/d L M/t"], bf16[b"B/d n_blocks M/t"]],
             layer_weights: Any,
@@ -863,13 +868,36 @@ class Model:
         )
 
         # reduce for each chunk of block_size to a single embedding
+        gx = shardops.all_gather("B/d L M/t -> B/d L M", x)
         x = einops.rearrange(
-            x,
+            gx,
             "B (n_blocks block_size) M -> B n_blocks block_size M",
             n_blocks=n_blocks,
         )
-        # TODO: investigate other reduction methods: mix through matmul/cnn, max/min
-        x = einops.reduce(x, "B n_blocks block_size M -> B n_blocks M", "sum")
+        if h.reduction_strategy == "sum":
+            x = einops.reduce(x, "B n_blocks block_size M -> B n_blocks M", "sum")
+        elif h.reduction_strategy == "wei_sum":
+            w_mix = shardops.all_gather(
+                "block_size/t/d 1 -> block_size 1", self.w_reduce_q
+            )
+            x = shardops.einsum_unreduced(
+                "B/d n_blocks block_size M, block_size 1 -> B/d n_blocks M", x, w_mix
+            )
+            x = shardops.psum_scatter("B/d n_blocks M -> B/d n_blocks M/t", x)
+        elif h.reduction_strategy == "max":
+            x = einops.reduce(x, "B (n_blocks block_size) M -> B n_blocks M", "max")
+        elif h.reduction_strategy == "attn":
+            w_reduce_q = shardops.all_gather(
+                "block_size/t/d 1 -> block_size 1", self.w_reduce_q
+            )
+            reduce_q = shardops.einsum_unreduced(
+                "B/d n_blocks block_size M, block_size 1 -> B/d n_blocks 1 M",
+                x,
+                w_reduce_q,
+            )
+            pass
+        elif h.reduction_strategy == "cnn":
+            pass
 
         # Process through concept decoder blocks
         x, () = jax.lax.scan(
@@ -1192,6 +1220,7 @@ def training_step(
             x_w_o=1.0,
             x_lnx=1.0,
             x_lnz=1.0,
+            w_reduce_q=1.0,
         )
 
         if hparams.use_grad_clip:

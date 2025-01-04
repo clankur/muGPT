@@ -82,6 +82,7 @@ class Hparams:
     block_size: int
     layers: int
     n_e_layers: int  # Number of encoder layers
+    n_t_layers: int  # Number of token decoder layers
     base: BaseWidths
 
     # fields for position embeddings
@@ -257,27 +258,27 @@ class Model:
     e_w_down: f32["n_e_layers d_model/d d_ff/t"]
 
     # New token decoder weights
-    t_ln1: f32["layers d_model/t/d"]
-    t_ln2: f32["layers d_model/t/d"]
-    t_w_q: f32["layers d_model/d n_q_per_kv n_kv/t d_head"]
-    t_w_kv: f32["layers 2 d_model/d n_kv/t d_head"]
-    t_w_o: f32["layers d_model/d n_q_per_kv n_kv/t d_head"]
-    t_w_gate: f32["layers d_model/d d_ff/t"]
-    t_w_up: f32["layers d_model/d d_ff/t"]
-    t_w_down: f32["layers d_model/d d_ff/t"]
+    t_ln1: f32["n_t_layers d_model/t/d"]
+    t_ln2: f32["n_t_layers d_model/t/d"]
+    t_w_q: f32["n_t_layers d_model/d n_q_per_kv n_kv/t d_head"]
+    t_w_kv: f32["n_t_layers 2 d_model/d n_kv/t d_head"]
+    t_w_o: f32["n_t_layers d_model/d n_q_per_kv n_kv/t d_head"]
+    t_w_gate: f32["n_t_layers d_model/d d_ff/t"]
+    t_w_up: f32["n_t_layers d_model/d d_ff/t"]
+    t_w_down: f32["n_t_layers d_model/d d_ff/t"]
 
     # Cross attention weights for token decoder
     x_w_q: f32[
-        "layers d_model/d n_q_per_kv n_kv/t d_head"
+        "n_t_layers d_model/d n_q_per_kv n_kv/t d_head"
     ]  # Query weights for cross attention
     x_w_kv: f32[
-        "layers 2 d_model/d n_kv/t d_head"
+        "n_t_layers 2 d_model/d n_kv/t d_head"
     ]  # Key/value weights for cross attention
     x_w_o: f32[
-        "layers d_model/d n_q_per_kv n_kv/t d_head"
+        "n_t_layers d_model/d n_q_per_kv n_kv/t d_head"
     ]  # Output weights for cross attention
-    x_lnx: f32["layers d_model/t/d"]
-    x_lnz: f32["layers d_model/t/d"]
+    x_lnx: f32["n_t_layers d_model/t/d"]
+    x_lnz: f32["n_t_layers d_model/t/d"]
 
     w_mix: f32["block_size/t/d 1"]  # Separate tensor for weighted sum reduction
     w_reduce_q: f32["1 d_model/t/d"]  # Modified shape for direct query tensor
@@ -390,13 +391,13 @@ class Model:
             fold_in_str(rng, "e_w_down"), -2, 2, e_ff_shape, dtype=jnp.float32
         )
 
-        # Initialize token decoder weights with layers dimension
-        t_ln1 = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
-        t_ln2 = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
+        # Initialize token decoder weights with n_t_layers dimension
+        t_ln1 = jnp.ones((h.n_t_layers, h.d_model), dtype=jnp.float32)
+        t_ln2 = jnp.ones((h.n_t_layers, h.d_model), dtype=jnp.float32)
 
-        t_w_q_shape = (h.layers, h.d_model, h.n_q_per_kv, h.n_kv, h.d_head)
-        t_w_kv_shape = (h.layers, 2, h.d_model, h.n_kv, h.d_head)
-        t_ff_shape = (h.layers, h.d_model, h.d_ff)
+        t_w_q_shape = (h.n_t_layers, h.d_model, h.n_q_per_kv, h.n_kv, h.d_head)
+        t_w_kv_shape = (h.n_t_layers, 2, h.d_model, h.n_kv, h.d_head)
+        t_ff_shape = (h.n_t_layers, h.d_model, h.d_ff)
 
         t_w_q = w_q_scale * jax.random.truncated_normal(
             fold_in_str(rng, "t_w_q"), -2, 2, t_w_q_shape, dtype=jnp.float32
@@ -428,9 +429,9 @@ class Model:
             fold_in_str(rng, "x_w_o"), -2, 2, t_w_q_shape, dtype=jnp.float32
         )
 
-        # Initialize cross attention layer norms
-        x_lnx = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
-        x_lnz = jnp.ones((h.layers, h.d_model), dtype=jnp.float32)
+        # Initialize cross attention layer norms with n_t_layers dimension
+        x_lnx = jnp.ones((h.n_t_layers, h.d_model), dtype=jnp.float32)
+        x_lnz = jnp.ones((h.n_t_layers, h.d_model), dtype=jnp.float32)
 
         # Initialize w_mix for weighted sum reduction
         block_size_scale = (h.block_size / h.base.block_size) ** -p.hidden_param_mult
@@ -950,6 +951,7 @@ class Model:
             ),
         )
 
+        # Process through token decoder blocks
         (x, _), () = jax.lax.scan(
             token_decoder_block,
             (

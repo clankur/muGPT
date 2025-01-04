@@ -779,6 +779,7 @@ class Model:
 
             nx = jnp.bfloat16(rms_norm(gx) * x_lnx)  # Normalize token decoder input
             gz = shardops.all_gather("B/d n_blocks M/t -> B/d n_blocks M", z)
+
             nz = jnp.bfloat16(rms_norm(gz) * x_lnz)  # Normalize concept embeddings
 
             x_w_q = shardops.all_gather("M/d Q K/t D -> M Q K/t D", jnp.bfloat16(x_w_q))
@@ -886,10 +887,6 @@ class Model:
             ),
         )
 
-        # Process through token decoder blocks
-        x = einops.repeat(
-            x, "B n_blocks M -> B (n_blocks block_size) M", block_size=h.block_size
-        )
         (x, _), () = jax.lax.scan(
             token_decoder_block,
             (
@@ -1044,7 +1041,9 @@ class RopeTable:
 
 
 @typechecked
-def rms_norm(x: bf16[b"batch/d len M"]) -> bf16[b"batch/d len M"]:
+def rms_norm(
+    x: Union[bf16[b"batch/d len M"], bf16[b"batch/d n_block M"]]
+) -> Union[bf16[b"batch/d len M"], bf16[b"batch/d n_block M"]]:
     mean2 = save_for_backward(
         jnp.mean(jax.lax.square(jnp.float32(x)), axis=-1, keepdims=True)
     )

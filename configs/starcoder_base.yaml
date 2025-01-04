@@ -30,6 +30,7 @@ hf_dataset:
   sequences_packed_per_batch: 120
   seed: 0
   max_retries: 5
+  select_column: content
 
 paths:
   # root_working_dir can also be a path on a local filesystem

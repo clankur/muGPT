@@ -53,4 +53,4 @@ model:
 checkpoint_interval: 9200
 
 hf_dataset:
-  num_workers: 64
+  num_workers: 8

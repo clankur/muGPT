@@ -353,6 +353,7 @@ class HuggingFaceDataParams:
     name: Optional[str] = None
     seed: int = 0
     max_retries: int = 5
+    select_column: Optional[str] = "text"
 
 
 class HuggingFaceDataLoader:
@@ -411,14 +412,12 @@ class HuggingFaceDataLoader:
                 else:
                     raise
         dataset = self.dataset.shuffle(seed=self.config.seed)
-        if self.config.path == "bigcode/starcoderdata":
-            tokenized = dataset.select_columns(["content"]).map(
-                self.tokenize, input_columns=["content"], remove_columns=["content"]
-            )
-        else:
-            tokenized = dataset.select_columns(["text"]).map(
-                self.tokenize, input_columns=["text"], remove_columns=["text"]
-            )
+
+        tokenized = dataset.select_columns([self.config.select_column]).map(
+            self.tokenize,
+            input_columns=[self.config.select_column],
+            remove_columns=[self.config.select_column],
+        )
         dataloader = DataLoader(
             tokenized,
             num_workers=self.config.num_workers,
@@ -450,8 +449,10 @@ class HuggingFaceDataLoader:
                 return batch, is_start
             except StopIteration:
                 dataset = self.dataset.shuffle(seed=self.config.seed + step)
-                tokenized = dataset.select_columns(["text"]).map(
-                    self.tokenize, input_columns=["text"], remove_columns=["text"]
+                tokenized = dataset.select_columns([self.config.select_column]).map(
+                    self.tokenize,
+                    input_columns=[self.config.select_column],
+                    remove_columns=[self.config.select_column],
                 )
                 dataloader = DataLoader(
                     tokenized,
@@ -463,7 +464,7 @@ class HuggingFaceDataLoader:
                 self.iterator = iter(dataloader)
                 batch, is_start = next(self.iterator)
             except HfHubHTTPError as e:
-                if e.response.status_code == 429:  # Too Many Requests
+                if e.response.status_code == 429:
                     if attempt == self.config.max_retries - 1:
                         raise
 
